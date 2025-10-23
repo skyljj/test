@@ -1,42 +1,50 @@
 # test
 
 #!/bin/bash
-# PowerFlex 4.6+ API login + fetch non-compliant resources
-# Requires: curl, jq
+# PowerFlex 多 MGMT 合规报告导出 CSV（列表内置）
 
-MGMT="https://<MGMT>"      # 🔧 Replace with PowerFlex Manager address
-USER="<USER>"              # 🔧 Replace with your username
-PASS="<PASS>"              # 🔧 Replace with your password
+OUTPUT="compliance_report.csv"
 
-# --- Step 1: Login and get token ---
-echo "[INFO] Logging in to PowerFlex..."
-LOGIN_RESP=$(curl -k -s -X POST "${MGMT}/auth/login" \
-  -H "Content-Type: application/json" \
-  -d "{\"username\":\"${USER}\",\"password\":\"${PASS}\"}")
+# --- CSV 表头 ---
+echo '"mgmt_displayname","mgmt_url","compliance","displayname","servicetag"' > "$OUTPUT"
 
-# Extract token (supports .access_token or .token)
-TOKEN=$(echo "$LOGIN_RESP" | jq -r '.access_token // .token')
+# --- 定义 MGMT 列表 ---
+MGMT_LIST='[
+  {"displayname":"MGMT-A","url":"https://a.com","username":"userA","password":"passA"},
+  {"displayname":"MGMT-B","url":"https://b.com","username":"userB","password":"passB"}
+]'
 
-if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
-  echo "[ERROR] Failed to get token. Response:"
-  echo "$LOGIN_RESP"
-  exit 1
-fi
-echo "[INFO] Got token: ${TOKEN:0:20}..."
+# --- 遍历每个 MGMT ---
+echo "$MGMT_LIST" | jq -c '.[]' | while read -r mgmt; do
+  NAME=$(echo "$mgmt" | jq -r '.displayname')
+  URL=$(echo "$mgmt" | jq -r '.url')
+  USER=$(echo "$mgmt" | jq -r '.username')
+  PASS=$(echo "$mgmt" | jq -r '.password')
 
-# --- Step 2: Query compliance report ---
-echo "[INFO] Fetching compliance report..."
-COMP_RESP=$(curl -k -s -X GET "${MGMT}/api/complianceReport" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Accept: application/json")
+  echo "[INFO] Processing $NAME ($URL)"
 
-# Save full JSON (optional)
-echo "$COMP_RESP" > compliance_full.json
+  # --- 登录 ---
+  LOGIN_RESP=$(curl -k -s -X POST "${URL}/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"username\":\"${USER}\",\"password\":\"${PASS}\"}")
 
-# --- Step 3: Filter non-compliant resources ---
-echo "[INFO] Non-compliant resources:"
-echo "$COMP_RESP" | jq -r '
-  (["compliance","displayname","servicetag"]),
-  (.[] | [.compliance, .displayname, .servicetag])
-  | @csv
-' > "$OUTPUT"
+  TOKEN=$(echo "$LOGIN_RESP" | jq -r '.access_token // .token')
+
+  if [ -z "$TOKEN" ] || [ "$TOKEN" == "null" ]; then
+    echo "[WARN] Failed to get token for $NAME, skipping..."
+    continue
+  fi
+
+  # --- 获取合规报告 ---
+  COMP_RESP=$(curl -k -s -X GET "${URL}/api/complianceReport" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/json")
+
+  # --- 写入 CSV ---
+  echo "$COMP_RESP" | jq -r --arg name "$NAME" --arg url "$URL" '
+    .[] | [$name, $url, .compliance, .displayname, .servicetag] | @csv
+  ' >> "$OUTPUT"
+
+done
+
+echo "[INFO] Done! CSV saved to $OUTPUT"
