@@ -35,4 +35,8 @@ echo "$COMP_RESP" > compliance_full.json
 
 # --- Step 3: Filter non-compliant resources ---
 echo "[INFO] Non-compliant resources:"
-echo "$COMP_RESP" | jq '.resources[] | select(.compliant == false) | {id: .id, name: .name, status: .status, reason: .reason}'
+echo "$COMP_RESP" | jq -r '
+  (["compliance","displayname","servicetag"]),
+  (.[] | [.compliance, .displayname, .servicetag])
+  | @csv
+' > "$OUTPUT"
