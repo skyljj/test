@@ -1,5 +1,5 @@
-# PowerShell脚本：关闭多个vCenter中的虚拟机并重命名
-# 功能：连接到10个vCenter，每个vCenter关闭10台VM并重命名为 vm-name_deco
+# PowerShell Script: Power off VMs in multiple vCenters and rename
+# Function: Connect to 10 vCenters, power off 10 VMs in each vCenter and rename to vm-name_deco
 
 param(
     [Parameter(Mandatory=$false)]
@@ -11,7 +11,7 @@ try {
     Import-Module VMware.PowerCLI -ErrorAction Stop
     Write-Host "VMware PowerCLI模块已成功导入" -ForegroundColor Green
 } catch {
-    Write-Error "无法导入VMware PowerCLI模块。请确保已安装VMware PowerCLI。"
+    Write-Error "Cannot import VMware PowerCLI module. Please ensure VMware PowerCLI is installed."
     exit 1
 }
 
@@ -59,15 +59,15 @@ function Connect-ToVCenter {
     )
     
     try {
-        Write-Log "正在连接到 $($vCenter.Name) ($($vCenter.Server))..."
+        Write-Log "Connecting to $($vCenter.Name) ($($vCenter.Server))..."
         $securePassword = ConvertTo-SecureString $vCenter.Password -AsPlainText -Force
         $credential = New-Object System.Management.Automation.PSCredential($vCenter.User, $securePassword)
         
         $connection = Connect-VIServer -Server $vCenter.Server -Credential $credential -ErrorAction Stop
-        Write-Log "成功连接到 $($vCenter.Name)" "SUCCESS"
+        Write-Log "Successfully connected to $($vCenter.Name)" "SUCCESS"
         return $connection
     } catch {
-        Write-Log "连接失败 $($vCenter.Name): $($_.Exception.Message)" "ERROR"
+        Write-Log "Connection failed $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         return $null
     }
 }
@@ -82,29 +82,29 @@ function PowerOffAndRenameVM {
     try {
         # 检查虚拟机状态
         if ($vm.PowerState -eq "PoweredOn") {
-            Write-Log "正在关闭虚拟机: $($vm.Name) 在 $vCenterName"
+            Write-Log "Powering off VM: $($vm.Name) in $vCenterName"
             Stop-VM -VM $vm -Confirm:$false -ErrorAction Stop
-            Write-Log "虚拟机 $($vm.Name) 已成功关闭" "SUCCESS"
+            Write-Log "VM $($vm.Name) has been successfully powered off" "SUCCESS"
         } else {
-            Write-Log "虚拟机 $($vm.Name) 已经关闭，跳过关闭操作"
+            Write-Log "VM $($vm.Name) is already powered off, skipping power off operation"
         }
         
-        # 重命名虚拟机
+        # Rename VM
         $newName = "$($vm.Name)_deco"
-        Write-Log "正在重命名虚拟机: $($vm.Name) -> $newName"
+        Write-Log "Renaming VM: $($vm.Name) -> $newName"
         Set-VM -VM $vm -Name $newName -Confirm:$false -ErrorAction Stop
-        Write-Log "虚拟机重命名成功: $($vm.Name) -> $newName" "SUCCESS"
+        Write-Log "VM renamed successfully: $($vm.Name) -> $newName" "SUCCESS"
         
         return $true
     } catch {
-        Write-Log "处理虚拟机 $($vm.Name) 时出错: $($_.Exception.Message)" "ERROR"
+        Write-Log "Error processing VM $($vm.Name): $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
 
 # 主执行逻辑
 function Main {
-    Write-Log "开始执行虚拟机关闭和重命名任务"
+    Write-Log "Starting VM power off and rename task"
     Write-Log "日志文件: $LogFile"
     
     $totalProcessed = 0
@@ -114,22 +114,22 @@ function Main {
     foreach ($vCenter in $vCenters) {
         # 检查是否配置了需要处理的虚拟机
         if (-not $vmsToDecoMap.ContainsKey($vCenter.Name)) {
-            Write-Log "未配置 $($vCenter.Name) 需要deco的虚拟机，跳过该vCenter" "INFO"
+            Write-Log "No VMs configured for deco in $($vCenter.Name), skipping this vCenter" "INFO"
             continue
         }
         
-        Write-Log "处理vCenter: $($vCenter.Name)"
+        Write-Log "Processing vCenter: $($vCenter.Name)"
         
         # 连接到vCenter
         $connection = Connect-ToVCenter -vCenter $vCenter
         if (-not $connection) {
-            Write-Log "跳过vCenter: $($vCenter.Name) - 连接失败" "WARNING"
+            Write-Log "Skipping vCenter: $($vCenter.Name) - Connection failed" "WARNING"
             continue
         }
         
         try {
-            # 获取需要deco的虚拟机列表
-            Write-Log "获取 $($vCenter.Name) 需要deco的虚拟机列表..."
+            # Get list of VMs that need deco
+            Write-Log "Getting list of VMs that need deco in $($vCenter.Name)..."
             $vmNames = $vmsToDecoMap[$vCenter.Name]
             $vms = @()
             foreach ($vmName in $vmNames) {
@@ -137,21 +137,21 @@ function Main {
                 if ($vmObj) {
                     $vms += $vmObj
                 } else {
-                    Write-Log "未找到虚拟机: $vmName in $($vCenter.Name)" "WARNING"
+                    Write-Log "VM not found: $vmName in $($vCenter.Name)" "WARNING"
                 }
             }
             
             if ($vms.Count -eq 0) {
-                Write-Log "在 $($vCenter.Name) 中未找到虚拟机" "WARNING"
+                Write-Log "No VMs found in $($vCenter.Name)" "WARNING"
                 continue
             }
             
-            Write-Log "在 $($vCenter.Name) 中找到 $($vms.Count) 台虚拟机"
+            Write-Log "Found $($vms.Count) VMs in $($vCenter.Name)"
             
-            # 处理每台虚拟机
+            # Process each VM
             foreach ($vm in $vms) {
                 $totalProcessed++
-                Write-Log "处理虚拟机: $($vm.Name) (第 $totalProcessed 台)"
+                Write-Log "Processing VM: $($vm.Name) (#$totalProcessed)"
                 
                 $result = PowerOffAndRenameVM -vCenterName $vCenter.Name -vm $vm
                 if ($result) {
@@ -162,28 +162,28 @@ function Main {
             }
             
         } catch {
-            Write-Log "处理vCenter $($vCenter.Name) 时出错: $($_.Exception.Message)" "ERROR"
+            Write-Log "Error processing vCenter $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         } finally {
-            # 断开连接
+            # Disconnect
             try {
                 Disconnect-VIServer -Server $connection -Confirm:$false -ErrorAction SilentlyContinue
-                Write-Log "已断开与 $($vCenter.Name) 的连接"
+                Write-Log "Disconnected from $($vCenter.Name)"
             } catch {
-                Write-Log "断开连接时出错: $($_.Exception.Message)" "WARNING"
+                Write-Log "Error during disconnect: $($_.Exception.Message)" "WARNING"
             }
         }
     }
     
-    # 输出总结
-    Write-Log "任务完成总结:"
-    Write-Log "总处理虚拟机数: $totalProcessed"
-    Write-Log "成功处理数: $totalSuccess"
-    Write-Log "失败数: $totalFailed"
-    Write-Log "详细日志请查看: $LogFile"
+    # Output summary
+    Write-Log "Task completion summary:"
+    Write-Log "Total VMs processed: $totalProcessed"
+    Write-Log "Successfully processed: $totalSuccess"
+    Write-Log "Failed: $totalFailed"
+    Write-Log "Detailed log available at: $LogFile"
 }
 
 # 执行主函数
 Main
 
-Write-Host "脚本执行完成。按任意键退出..."
+Write-Host "Script execution completed. Press any key to exit..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
