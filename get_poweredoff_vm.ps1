@@ -1,5 +1,5 @@
-# PowerShell脚本：获取所有vCenter中已关闭的虚拟机
-# 功能：连接到所有vCenter，获取已关闭的虚拟机列表并保存到文件
+# PowerShell Script: Get all powered-off VMs from all vCenters
+# Function: Connect to all vCenters, get list of powered-off VMs and save to file
 
 param(
     [Parameter(Mandatory=$false)]
@@ -13,7 +13,7 @@ try {
     Import-Module VMware.PowerCLI -ErrorAction Stop
     Write-Host "VMware PowerCLI模块已成功导入" -ForegroundColor Green
 } catch {
-    Write-Error "无法导入VMware PowerCLI模块。请确保已安装VMware PowerCLI。"
+    Write-Error "Cannot import VMware PowerCLI module. Please ensure VMware PowerCLI is installed."
     exit 1
 }
 
@@ -54,15 +54,15 @@ function Connect-ToVCenter {
     )
     
     try {
-        Write-Log "正在连接到 $($vCenter.Name) ($($vCenter.Server))..."
+        Write-Log "Connecting to $($vCenter.Name) ($($vCenter.Server))..."
         $securePassword = ConvertTo-SecureString $vCenter.Password -AsPlainText -Force
         $credential = New-Object System.Management.Automation.PSCredential($vCenter.User, $securePassword)
         
         $connection = Connect-VIServer -Server $vCenter.Server -Credential $credential -ErrorAction Stop
-        Write-Log "成功连接到 $($vCenter.Name)" "SUCCESS"
+        Write-Log "Successfully connected to $($vCenter.Name)" "SUCCESS"
         return $connection
     } catch {
-        Write-Log "连接失败 $($vCenter.Name): $($_.Exception.Message)" "ERROR"
+        Write-Log "Connection failed $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         return $null
     }
 }
@@ -74,7 +74,7 @@ function Get-PoweredOffVMs {
     )
     
     try {
-        Write-Log "获取 $vCenterName 中已关闭的虚拟机..."
+        Write-Log "Getting powered-off VMs in $vCenterName..."
         $poweredOffVMs = Get-VM | Where-Object { $_.PowerState -eq "PoweredOff" }
         
         $vmList = @()
@@ -92,17 +92,17 @@ function Get-PoweredOffVMs {
             $vmList += $vmInfo
         }
         
-        Write-Log "在 $vCenterName 中找到 $($vmList.Count) 台已关闭的虚拟机" "SUCCESS"
+        Write-Log "Found $($vmList.Count) powered-off VMs in $vCenterName" "SUCCESS"
         return $vmList
     } catch {
-        Write-Log "获取 $vCenterName 中已关闭虚拟机时出错: $($_.Exception.Message)" "ERROR"
+        Write-Log "Error getting powered-off VMs in $vCenterName: $($_.Exception.Message)" "ERROR"
         return @()
     }
 }
 
 # 主执行逻辑
 function Main {
-    Write-Log "开始获取所有vCenter中已关闭的虚拟机"
+    Write-Log "Starting to get all powered-off VMs from all vCenters"
     Write-Log "日志文件: $LogFile"
     Write-Log "输出文件: $OutputFile"
     
@@ -110,12 +110,12 @@ function Main {
     $totalVMs = 0
     
     foreach ($vCenter in $vCenters) {
-        Write-Log "处理vCenter: $($vCenter.Name)"
+        Write-Log "Processing vCenter: $($vCenter.Name)"
         
         # 连接到vCenter
         $connection = Connect-ToVCenter -vCenter $vCenter
         if (-not $connection) {
-            Write-Log "跳过vCenter: $($vCenter.Name) - 连接失败" "WARNING"
+            Write-Log "Skipping vCenter: $($vCenter.Name) - Connection failed" "WARNING"
             continue
         }
         
@@ -126,19 +126,19 @@ function Main {
             $totalVMs += $poweredOffVMs.Count
             
         } catch {
-            Write-Log "处理vCenter $($vCenter.Name) 时出错: $($_.Exception.Message)" "ERROR"
+            Write-Log "Error processing vCenter $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         } finally {
-            # 断开连接
+            # Disconnect
             try {
                 Disconnect-VIServer -Server $connection -Confirm:$false -ErrorAction SilentlyContinue
-                Write-Log "已断开与 $($vCenter.Name) 的连接"
+                Write-Log "Disconnected from $($vCenter.Name)"
             } catch {
-                Write-Log "断开连接时出错: $($_.Exception.Message)" "WARNING"
+                Write-Log "Error during disconnect: $($_.Exception.Message)" "WARNING"
             }
         }
     }
     
-    # 保存结果到JSON文件
+    # Save results to JSON file
     try {
         $outputData = @{
             Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -147,45 +147,45 @@ function Main {
         }
         
         $outputData | ConvertTo-Json -Depth 3 | Out-File -FilePath $OutputFile -Encoding UTF8
-        Write-Log "已关闭虚拟机列表已保存到: $OutputFile" "SUCCESS"
+        Write-Log "Powered-off VM list saved to: $OutputFile" "SUCCESS"
         
-        # 同时保存为CSV格式（便于在Windows中查看）
+        # Also save as CSV format (easy to view in Windows)
         $csvFile = $OutputFile -replace "\.json$", ".csv"
         
-        # 创建适合Windows查看的CSV格式
+        # Create CSV format suitable for Windows viewing
         $csvData = @()
         foreach ($vm in $allPoweredOffVMs) {
             $csvRow = [PSCustomObject]@{
-                '虚拟机名称' = $vm.Name
-                '电源状态' = $vm.PowerState
+                'VM Name' = $vm.Name
+                'Power State' = $vm.PowerState
                 'vCenter' = $vm.vCenter
-                '虚拟机ID' = $vm.Id
-                '文件夹' = $vm.Folder
-                '资源池' = $vm.ResourcePool
-                '创建时间' = $vm.Created
-                '备注' = $vm.Notes
+                'VM ID' = $vm.Id
+                'Folder' = $vm.Folder
+                'Resource Pool' = $vm.ResourcePool
+                'Created' = $vm.Created
+                'Notes' = $vm.Notes
             }
             $csvData += $csvRow
         }
         
         $csvData | Export-Csv -Path $csvFile -NoTypeInformation -Encoding UTF8
-        Write-Log "已关闭虚拟机列表已保存到: $csvFile" "SUCCESS"
+        Write-Log "Powered-off VM list saved to: $csvFile" "SUCCESS"
         
     } catch {
-        Write-Log "保存输出文件时出错: $($_.Exception.Message)" "ERROR"
+        Write-Log "Error saving output file: $($_.Exception.Message)" "ERROR"
     }
     
-    # 输出总结
-    Write-Log "任务完成总结:"
-    Write-Log "总vCenter数: $($vCenters.Count)"
-    Write-Log "成功连接的vCenter数: $($vCenters.Count - (($vCenters | Where-Object { $_.Name -notin $allPoweredOffVMs.vCenter }).Count))"
-    Write-Log "总已关闭虚拟机数: $totalVMs"
-    Write-Log "详细日志请查看: $LogFile"
-    Write-Log "虚拟机列表请查看: $OutputFile"
+    # Output summary
+    Write-Log "Task completion summary:"
+    Write-Log "Total vCenters: $($vCenters.Count)"
+    Write-Log "Successfully connected vCenters: $($vCenters.Count - (($vCenters | Where-Object { $_.Name -notin $allPoweredOffVMs.vCenter }).Count))"
+    Write-Log "Total powered-off VMs: $totalVMs"
+    Write-Log "Detailed log available at: $LogFile"
+    Write-Log "VM list available at: $OutputFile"
 }
 
 # 执行主函数
 Main
 
-Write-Host "脚本执行完成。按任意键退出..."
+Write-Host "Script execution completed. Press any key to exit..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
