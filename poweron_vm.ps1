@@ -1,5 +1,5 @@
-# PowerShell脚本：启动所有vCenter中的虚拟机（除了已关闭的虚拟机）
-# 功能：读取已关闭虚拟机列表，启动除了这些虚拟机之外的所有其他虚拟机
+# PowerShell Script: Power on all VMs in all vCenters (except powered-off VMs)
+# Function: Read powered-off VM list, start all other VMs except those in the list
 
 param(
     [Parameter(Mandatory=$false)]
@@ -15,7 +15,7 @@ try {
     Import-Module VMware.PowerCLI -ErrorAction Stop
     Write-Host "VMware PowerCLI模块已成功导入" -ForegroundColor Green
 } catch {
-    Write-Error "无法导入VMware PowerCLI模块。请确保已安装VMware PowerCLI。"
+    Write-Error "Cannot import VMware PowerCLI module. Please ensure VMware PowerCLI is installed."
     exit 1
 }
 
@@ -56,15 +56,15 @@ function Connect-ToVCenter {
     )
     
     try {
-        Write-Log "正在连接到 $($vCenter.Name) ($($vCenter.Server))..."
+        Write-Log "Connecting to $($vCenter.Name) ($($vCenter.Server))..."
         $securePassword = ConvertTo-SecureString $vCenter.Password -AsPlainText -Force
         $credential = New-Object System.Management.Automation.PSCredential($vCenter.User, $securePassword)
         
         $connection = Connect-VIServer -Server $vCenter.Server -Credential $credential -ErrorAction Stop
-        Write-Log "成功连接到 $($vCenter.Name)" "SUCCESS"
+        Write-Log "Successfully connected to $($vCenter.Name)" "SUCCESS"
         return $connection
     } catch {
-        Write-Log "连接失败 $($vCenter.Name): $($_.Exception.Message)" "ERROR"
+        Write-Log "Connection failed $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         return $null
     }
 }
@@ -79,19 +79,19 @@ function Start-VM {
     try {
         # 检查虚拟机状态
         if ($vm.PowerState -eq "PoweredOff") {
-            Write-Log "正在启动虚拟机: $($vm.Name) 在 $vCenterName"
+            Write-Log "Starting VM: $($vm.Name) in $vCenterName"
             Start-VM -VM $vm -Confirm:$false -ErrorAction Stop
-            Write-Log "虚拟机 $($vm.Name) 启动命令已发送" "SUCCESS"
+            Write-Log "Start command sent for VM $($vm.Name)" "SUCCESS"
             return $true
         } elseif ($vm.PowerState -eq "PoweredOn") {
-            Write-Log "虚拟机 $($vm.Name) 已经运行，跳过启动操作"
+            Write-Log "VM $($vm.Name) is already running, skipping start operation"
             return $true
         } else {
-            Write-Log "虚拟机 $($vm.Name) 状态异常: $($vm.PowerState)" "WARNING"
+            Write-Log "VM $($vm.Name) has abnormal state: $($vm.PowerState)" "WARNING"
             return $false
         }
     } catch {
-        Write-Log "启动虚拟机 $($vm.Name) 时出错: $($_.Exception.Message)" "ERROR"
+        Write-Log "Error starting VM $($vm.Name): $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -104,7 +104,7 @@ function Read-PoweredOffVMList {
     
     try {
         if (-not (Test-Path $FilePath)) {
-            Write-Log "文件不存在: $FilePath" "ERROR"
+            Write-Log "File does not exist: $FilePath" "ERROR"
             return @()
         }
         
@@ -112,37 +112,37 @@ function Read-PoweredOffVMList {
         $data = $content | ConvertFrom-Json
         
         if ($data.PoweredOffVMs) {
-            Write-Log "成功读取已关闭虚拟机列表，共 $($data.PoweredOffVMs.Count) 台虚拟机" "SUCCESS"
+            Write-Log "Successfully read powered-off VM list, total $($data.PoweredOffVMs.Count) VMs" "SUCCESS"
             return $data.PoweredOffVMs
         } else {
-            Write-Log "文件中未找到已关闭虚拟机数据" "WARNING"
+            Write-Log "No powered-off VM data found in file" "WARNING"
             return @()
         }
     } catch {
-        Write-Log "读取已关闭虚拟机列表时出错: $($_.Exception.Message)" "ERROR"
+        Write-Log "Error reading powered-off VM list: $($_.Exception.Message)" "ERROR"
         return @()
     }
 }
 
 # 主执行逻辑
 function Main {
-    Write-Log "开始启动虚拟机任务"
+    Write-Log "Starting VM power on task"
     Write-Log "日志文件: $LogFile"
     Write-Log "已关闭虚拟机列表文件: $PoweredOffVMFile"
     
     # 读取已关闭虚拟机列表
     $poweredOffVMs = Read-PoweredOffVMList -FilePath $PoweredOffVMFile
     if ($poweredOffVMs.Count -eq 0) {
-        Write-Log "未找到已关闭虚拟机列表，将启动所有虚拟机" "WARNING"
+        Write-Log "No powered-off VM list found, will start all VMs" "WARNING"
     }
     
     if (-not $Force) {
-        Write-Log "警告：此操作将启动所有虚拟机（除了已关闭列表中的虚拟机）！" "WARNING"
-        Write-Log "使用 -Force 参数强制执行，或按 Ctrl+C 取消" "WARNING"
+        Write-Log "WARNING: This operation will start all VMs (except those in the powered-off list)!" "WARNING"
+        Write-Log "Use -Force parameter to force execution, or press Ctrl+C to cancel" "WARNING"
         
-        $confirmation = Read-Host "确认启动所有虚拟机？(输入 'YES' 确认)"
+        $confirmation = Read-Host "Confirm starting all VMs? (Type 'YES' to confirm)"
         if ($confirmation -ne "YES") {
-            Write-Log "操作已取消" "INFO"
+            Write-Log "Operation cancelled" "INFO"
             return
         }
     }
@@ -153,12 +153,12 @@ function Main {
     $totalSkipped = 0
     
     foreach ($vCenter in $vCenters) {
-        Write-Log "处理vCenter: $($vCenter.Name)"
+        Write-Log "Processing vCenter: $($vCenter.Name)"
         
         # 连接到vCenter
         $connection = Connect-ToVCenter -vCenter $vCenter
         if (-not $connection) {
-            Write-Log "跳过vCenter: $($vCenter.Name) - 连接失败" "WARNING"
+            Write-Log "Skipping vCenter: $($vCenter.Name) - Connection failed" "WARNING"
             continue
         }
         
@@ -167,21 +167,21 @@ function Main {
             $vCenterPoweredOffVMs = $poweredOffVMs | Where-Object { $_.vCenter -eq $vCenter.Name }
             $poweredOffVMNames = $vCenterPoweredOffVMs | ForEach-Object { $_.Name }
             
-            Write-Log "在 $($vCenter.Name) 中跳过 $($poweredOffVMNames.Count) 台已关闭的虚拟机"
+            Write-Log "Skipping $($poweredOffVMNames.Count) powered-off VMs in $($vCenter.Name)"
             
-            # 获取所有虚拟机
-            Write-Log "获取 $($vCenter.Name) 中的所有虚拟机..."
+            # Get all VMs
+            Write-Log "Getting all VMs in $($vCenter.Name)..."
             $allVMs = Get-VM
             
-            # 过滤掉已关闭的虚拟机
+            # Filter out powered-off VMs
             $vmsToStart = $allVMs | Where-Object { $_.Name -notin $poweredOffVMNames }
             
-            Write-Log "在 $($vCenter.Name) 中找到 $($vmsToStart.Count) 台需要启动的虚拟机"
+            Write-Log "Found $($vmsToStart.Count) VMs to start in $($vCenter.Name)"
             
-            # 处理每台虚拟机
+            # Process each VM
             foreach ($vm in $vmsToStart) {
                 $totalProcessed++
-                Write-Log "处理虚拟机: $($vm.Name) (第 $totalProcessed 台)"
+                Write-Log "Processing VM: $($vm.Name) (#$totalProcessed)"
                 
                 $result = Start-VM -vCenterName $vCenter.Name -vm $vm
                 if ($result) {
@@ -192,28 +192,28 @@ function Main {
             }
             
         } catch {
-            Write-Log "处理vCenter $($vCenter.Name) 时出错: $($_.Exception.Message)" "ERROR"
+            Write-Log "Error processing vCenter $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         } finally {
-            # 断开连接
+            # Disconnect
             try {
                 Disconnect-VIServer -Server $connection -Confirm:$false -ErrorAction SilentlyContinue
-                Write-Log "已断开与 $($vCenter.Name) 的连接"
+                Write-Log "Disconnected from $($vCenter.Name)"
             } catch {
-                Write-Log "断开连接时出错: $($_.Exception.Message)" "WARNING"
+                Write-Log "Error during disconnect: $($_.Exception.Message)" "WARNING"
             }
         }
     }
     
-    # 输出总结
-    Write-Log "任务完成总结:"
-    Write-Log "总处理虚拟机数: $totalProcessed"
-    Write-Log "成功启动数: $totalSuccess"
-    Write-Log "失败数: $totalFailed"
-    Write-Log "详细日志请查看: $LogFile"
+    # Output summary
+    Write-Log "Task completion summary:"
+    Write-Log "Total VMs processed: $totalProcessed"
+    Write-Log "Successfully started: $totalSuccess"
+    Write-Log "Failed: $totalFailed"
+    Write-Log "Detailed log available at: $LogFile"
 }
 
 # 执行主函数
 Main
 
-Write-Host "脚本执行完成。按任意键退出..."
+Write-Host "Script execution completed. Press any key to exit..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
