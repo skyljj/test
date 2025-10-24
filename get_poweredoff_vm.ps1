@@ -149,9 +149,26 @@ function Main {
         $outputData | ConvertTo-Json -Depth 3 | Out-File -FilePath $OutputFile -Encoding UTF8
         Write-Log "已关闭虚拟机列表已保存到: $OutputFile" "SUCCESS"
         
-        # 同时保存为CSV格式（便于查看）
+        # 同时保存为CSV格式（便于在Windows中查看）
         $csvFile = $OutputFile -replace "\.json$", ".csv"
-        $allPoweredOffVMs | Export-Csv -Path $csvFile -NoTypeInformation -Encoding UTF8
+        
+        # 创建适合Windows查看的CSV格式
+        $csvData = @()
+        foreach ($vm in $allPoweredOffVMs) {
+            $csvRow = [PSCustomObject]@{
+                '虚拟机名称' = $vm.Name
+                '电源状态' = $vm.PowerState
+                'vCenter' = $vm.vCenter
+                '虚拟机ID' = $vm.Id
+                '文件夹' = $vm.Folder
+                '资源池' = $vm.ResourcePool
+                '创建时间' = $vm.Created
+                '备注' = $vm.Notes
+            }
+            $csvData += $csvRow
+        }
+        
+        $csvData | Export-Csv -Path $csvFile -NoTypeInformation -Encoding UTF8
         Write-Log "已关闭虚拟机列表已保存到: $csvFile" "SUCCESS"
         
     } catch {
