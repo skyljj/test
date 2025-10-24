@@ -1,5 +1,5 @@
-# PowerShell脚本：删除多个vCenter中的_deco虚拟机
-# 功能：连接到vCenter，删除所有以_deco结尾的虚拟机（在poweroff_vm.ps1执行一周后运行）
+# PowerShell Script: Delete _deco VMs from multiple vCenters
+# Function: Connect to vCenters and delete all VMs ending with _deco (run one week after poweroff_vm.ps1)
 
 param(
     [Parameter(Mandatory=$false)]
@@ -13,7 +13,7 @@ try {
     Import-Module VMware.PowerCLI -ErrorAction Stop
     Write-Host "VMware PowerCLI模块已成功导入" -ForegroundColor Green
 } catch {
-    Write-Error "无法导入VMware PowerCLI模块。请确保已安装VMware PowerCLI。"
+    Write-Error "Cannot import VMware PowerCLI module. Please ensure VMware PowerCLI is installed."
     exit 1
 }
 
@@ -61,15 +61,15 @@ function Connect-ToVCenter {
     )
     
     try {
-        Write-Log "正在连接到 $($vCenter.Name) ($($vCenter.Server))..."
+        Write-Log "Connecting to $($vCenter.Name) ($($vCenter.Server))..."
         $securePassword = ConvertTo-SecureString $vCenter.Password -AsPlainText -Force
         $credential = New-Object System.Management.Automation.PSCredential($vCenter.User, $securePassword)
         
         $connection = Connect-VIServer -Server $vCenter.Server -Credential $credential -ErrorAction Stop
-        Write-Log "成功连接到 $($vCenter.Name)" "SUCCESS"
+        Write-Log "Successfully connected to $($vCenter.Name)" "SUCCESS"
         return $connection
     } catch {
-        Write-Log "连接失败 $($vCenter.Name): $($_.Exception.Message)" "ERROR"
+        Write-Log "Connection failed $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         return $null
     }
 }
@@ -84,22 +84,22 @@ function DeleteVM {
     try {
         # 确保虚拟机已关闭
         if ($vm.PowerState -eq "PoweredOn") {
-            Write-Log "正在强制关闭虚拟机: $($vm.Name) 在 $vCenterName"
+            Write-Log "Force stopping VM: $($vm.Name) in $vCenterName"
             Stop-VM -VM $vm -Confirm:$false -ErrorAction Stop
-            Write-Log "虚拟机 $($vm.Name) 已强制关闭" "SUCCESS"
+            Write-Log "VM $($vm.Name) has been force stopped" "SUCCESS"
             
-            # 等待虚拟机完全关闭
+            # Wait for VM to fully stop
             Start-Sleep -Seconds 10
         }
         
-        # 删除虚拟机
-        Write-Log "正在删除虚拟机: $($vm.Name) 在 $vCenterName"
+        # Delete VM
+        Write-Log "Deleting VM: $($vm.Name) in $vCenterName"
         Remove-VM -VM $vm -DeletePermanently -Confirm:$false -ErrorAction Stop
-        Write-Log "虚拟机 $($vm.Name) 已成功删除" "SUCCESS"
+        Write-Log "VM $($vm.Name) has been successfully deleted" "SUCCESS"
         
         return $true
     } catch {
-        Write-Log "删除虚拟机 $($vm.Name) 时出错: $($_.Exception.Message)" "ERROR"
+        Write-Log "Error deleting VM $($vm.Name): $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -107,16 +107,16 @@ function DeleteVM {
 
 # 主执行逻辑
 function Main {
-    Write-Log "开始执行虚拟机删除任务"
+    Write-Log "Starting VM deletion task"
     Write-Log "日志文件: $LogFile"
     
     if (-not $Force) {
-        Write-Log "警告：此操作将永久删除虚拟机！" "WARNING"
-        Write-Log "使用 -Force 参数强制执行，或按 Ctrl+C 取消" "WARNING"
+        Write-Log "WARNING: This operation will permanently delete VMs!" "WARNING"
+        Write-Log "Use -Force parameter to force execution, or press Ctrl+C to cancel" "WARNING"
         
-        $confirmation = Read-Host "确认删除所有_deco虚拟机？(输入 'YES' 确认)"
+        $confirmation = Read-Host "Confirm deletion of all _deco VMs? (Type 'YES' to confirm)"
         if ($confirmation -ne "YES") {
-            Write-Log "操作已取消" "INFO"
+            Write-Log "Operation cancelled" "INFO"
             return
         }
     }
@@ -128,46 +128,46 @@ function Main {
     foreach ($vCenter in $vCenters) {
         # 检查是否配置了需要处理的虚拟机
         if (-not $vmsToDeleteMap.ContainsKey($vCenter.Name)) {
-            Write-Log "未配置 $($vCenter.Name) 需要删除的虚拟机，跳过该vCenter" "INFO"
+            Write-Log "No VMs configured for deletion in $($vCenter.Name), skipping this vCenter" "INFO"
             continue
         }
         
-        Write-Log "处理vCenter: $($vCenter.Name)"
+        Write-Log "Processing vCenter: $($vCenter.Name)"
         
         # 连接到vCenter
         $connection = Connect-ToVCenter -vCenter $vCenter
         if (-not $connection) {
-            Write-Log "跳过vCenter: $($vCenter.Name) - 连接失败" "WARNING"
+            Write-Log "Skipping vCenter: $($vCenter.Name) - Connection failed" "WARNING"
             continue
         }
         
         try {
-            # 获取需要删除的虚拟机列表
-            Write-Log "获取 $($vCenter.Name) 需要删除的虚拟机列表..."
+            # Get list of VMs to delete
+            Write-Log "Getting list of VMs to delete in $($vCenter.Name)..."
             $vmNames = $vmsToDeleteMap[$vCenter.Name]
             $vms = @()
             foreach ($vmName in $vmNames) {
-                # 查找 vm_name_deco 格式的虚拟机
+                # Find VMs with vm_name_deco format
                 $decoVMName = "$vmName" + "_deco"
                 $vmObj = Get-VM -Name $decoVMName -ErrorAction SilentlyContinue
                 if ($vmObj) {
                     $vms += $vmObj
                 } else {
-                    Write-Log "未找到虚拟机: $decoVMName in $($vCenter.Name)" "WARNING"
+                    Write-Log "VM not found: $decoVMName in $($vCenter.Name)" "WARNING"
                 }
             }
             
             if ($vms.Count -eq 0) {
-                Write-Log "在 $($vCenter.Name) 中未找到需要删除的虚拟机" "WARNING"
+                Write-Log "No VMs found for deletion in $($vCenter.Name)" "WARNING"
                 continue
             }
             
-            Write-Log "在 $($vCenter.Name) 中找到 $($vms.Count) 台需要删除的虚拟机"
+            Write-Log "Found $($vms.Count) VMs to delete in $($vCenter.Name)"
             
-            # 处理每台虚拟机
+            # Process each VM
             foreach ($vm in $vms) {
                 $totalProcessed++
-                Write-Log "处理虚拟机: $($vm.Name) (第 $totalProcessed 台)"
+                Write-Log "Processing VM: $($vm.Name) (#$totalProcessed)"
                 
                 $result = DeleteVM -vCenterName $vCenter.Name -vm $vm
                 if ($result) {
@@ -178,28 +178,28 @@ function Main {
             }
             
         } catch {
-            Write-Log "处理vCenter $($vCenter.Name) 时出错: $($_.Exception.Message)" "ERROR"
+            Write-Log "Error processing vCenter $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         } finally {
-            # 断开连接
+            # Disconnect
             try {
                 Disconnect-VIServer -Server $connection -Confirm:$false -ErrorAction SilentlyContinue
-                Write-Log "已断开与 $($vCenter.Name) 的连接"
+                Write-Log "Disconnected from $($vCenter.Name)"
             } catch {
-                Write-Log "断开连接时出错: $($_.Exception.Message)" "WARNING"
+                Write-Log "Error during disconnect: $($_.Exception.Message)" "WARNING"
             }
         }
     }
     
-    # 输出总结
-    Write-Log "任务完成总结:"
-    Write-Log "总处理虚拟机数: $totalProcessed"
-    Write-Log "成功删除数: $totalSuccess"
-    Write-Log "失败数: $totalFailed"
-    Write-Log "详细日志请查看: $LogFile"
+    # Output summary
+    Write-Log "Task completion summary:"
+    Write-Log "Total VMs processed: $totalProcessed"
+    Write-Log "Successfully deleted: $totalSuccess"
+    Write-Log "Failed: $totalFailed"
+    Write-Log "Detailed log available at: $LogFile"
 }
 
 # 执行主函数
 Main
 
-Write-Host "脚本执行完成。按任意键退出..."
+Write-Host "Script execution completed. Press any key to exit..."
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
