@@ -127,8 +127,8 @@ function Read-PoweredOffVMList {
 # 主执行逻辑
 function Main {
     Write-Log "Starting VM power on task"
-    Write-Log "日志文件: $LogFile"
-    Write-Log "已关闭虚拟机列表文件: $PoweredOffVMFile"
+    Write-Log "Log file: $LogFile"
+    Write-Log "Powered-off VM list file: $PoweredOffVMFile"
     
     # 读取已关闭虚拟机列表
     $poweredOffVMs = Read-PoweredOffVMList -FilePath $PoweredOffVMFile
@@ -151,6 +151,8 @@ function Main {
     $totalSuccess = 0
     $totalFailed = 0
     $totalSkipped = 0
+    $failedList = @()
+    $skippedList = @()
     
     foreach ($vCenter in $vCenters) {
         Write-Log "Processing vCenter: $($vCenter.Name)"
@@ -176,6 +178,16 @@ function Main {
             # Filter out powered-off VMs
             $vmsToStart = $allVMs | Where-Object { $_.Name -notin $poweredOffVMNames }
             
+            # Record skipped VMs
+            foreach ($skippedVM in $vCenterPoweredOffVMs) {
+                $totalSkipped++
+                $skippedInfo = @{
+                    vCenter = $vCenter.Name
+                    VMName = $skippedVM.Name
+                }
+                $skippedList += $skippedInfo
+            }
+            
             Write-Log "Found $($vmsToStart.Count) VMs to start in $($vCenter.Name)"
             
             # Process each VM
@@ -188,6 +200,11 @@ function Main {
                     $totalSuccess++
                 } else {
                     $totalFailed++
+                    $failedInfo = @{
+                        vCenter = $vCenter.Name
+                        VMName = $vm.Name
+                    }
+                    $failedList += $failedInfo
                 }
             }
             
@@ -205,11 +222,39 @@ function Main {
     }
     
     # Output summary
-    Write-Log "Task completion summary:"
+    Write-Log ""
+    Write-Log "=================================================================" "INFO"
+    Write-Log "Task Completion Summary" "INFO"
+    Write-Log "=================================================================" "INFO"
     Write-Log "Total VMs processed: $totalProcessed"
     Write-Log "Successfully started: $totalSuccess"
+    Write-Log "Skipped (powered-off): $totalSkipped"
     Write-Log "Failed: $totalFailed"
-    Write-Log "Detailed log available at: $LogFile"
+    Write-Log ""
+    
+    # Output skipped VM list
+    if ($skippedList.Count -gt 0) {
+        Write-Log "Skipped VMs (from powered-off list):" "INFO"
+        Write-Log "=================================================================" "INFO"
+        foreach ($item in $skippedList) {
+            Write-Log "  vCenter: $($item.vCenter) | VM: $($item.VMName)" "INFO"
+        }
+        Write-Log ""
+    }
+    
+    # Output failed VM list
+    if ($failedList.Count -gt 0) {
+        Write-Log "Failed VMs List:" "ERROR"
+        Write-Log "=================================================================" "INFO"
+        foreach ($item in $failedList) {
+            Write-Log "  vCenter: $($item.vCenter) | VM: $($item.VMName)" "ERROR"
+        }
+        Write-Log ""
+    }
+    
+    Write-Log "=================================================================" "INFO"
+    Write-Log "Detailed log available at: $LogFile" "INFO"
+    Write-Log "=================================================================" "INFO"
 }
 
 # 执行主函数
