@@ -82,14 +82,10 @@ function DeleteVM {
     )
     
     try {
-        # 确保虚拟机已关闭
+        # 如果虚拟机已开机，则跳过
         if ($vm.PowerState -eq "PoweredOn") {
-            Write-Log "Force stopping VM: $($vm.Name) in $vCenterName"
-            Stop-VM -VM $vm -Confirm:$false -ErrorAction Stop
-            Write-Log "VM $($vm.Name) has been force stopped" "SUCCESS"
-            
-            # Wait for VM to fully stop
-            Start-Sleep -Seconds 10
+            Write-Log "VM $($vm.Name) in $vCenterName is powered on, skipping deletion."
+            return $false
         }
         
         # Delete VM
@@ -108,7 +104,7 @@ function DeleteVM {
 # 主执行逻辑
 function Main {
     Write-Log "Starting VM deletion task"
-    Write-Log "日志文件: $LogFile"
+    Write-Log "Log file: $LogFile"
     
     if (-not $Force) {
         Write-Log "WARNING: This operation will permanently delete VMs!" "WARNING"
@@ -124,6 +120,10 @@ function Main {
     $totalProcessed = 0
     $totalSuccess = 0
     $totalFailed = 0
+    $totalNotFound = 0
+    $notFoundList = @()
+    $failedList = @()
+    $totalToProcess = 0
     
     foreach ($vCenter in $vCenters) {
         # 检查是否配置了需要处理的虚拟机
@@ -145,6 +145,8 @@ function Main {
             # Get list of VMs to delete
             Write-Log "Getting list of VMs to delete in $($vCenter.Name)..."
             $vmNames = $vmsToDeleteMap[$vCenter.Name]
+            $totalToProcess += $vmNames.Count
+            
             $vms = @()
             foreach ($vmName in $vmNames) {
                 # Find VMs with vm_name_deco format
@@ -153,6 +155,12 @@ function Main {
                 if ($vmObj) {
                     $vms += $vmObj
                 } else {
+                    $totalNotFound++
+                    $notFoundInfo = @{
+                        vCenter = $vCenter.Name
+                        VMName = $decoVMName
+                    }
+                    $notFoundList += $notFoundInfo
                     Write-Log "VM not found: $decoVMName in $($vCenter.Name)" "WARNING"
                 }
             }
@@ -174,6 +182,11 @@ function Main {
                     $totalSuccess++
                 } else {
                     $totalFailed++
+                    $failedInfo = @{
+                        vCenter = $vCenter.Name
+                        VMName = $vm.Name
+                    }
+                    $failedList += $failedInfo
                 }
             }
             
@@ -191,11 +204,40 @@ function Main {
     }
     
     # Output summary
-    Write-Log "Task completion summary:"
+    Write-Log ""
+    Write-Log "=================================================================" "INFO"
+    Write-Log "Task Completion Summary" "INFO"
+    Write-Log "=================================================================" "INFO"
+    Write-Log "Total VMs to process: $totalToProcess"
+    Write-Log "Total VMs not found: $totalNotFound"
     Write-Log "Total VMs processed: $totalProcessed"
     Write-Log "Successfully deleted: $totalSuccess"
     Write-Log "Failed: $totalFailed"
-    Write-Log "Detailed log available at: $LogFile"
+    Write-Log ""
+    
+    # Output not found VM list
+    if ($notFoundList.Count -gt 0) {
+        Write-Log "VMs Not Found List:" "WARNING"
+        Write-Log "=================================================================" "INFO"
+        foreach ($item in $notFoundList) {
+            Write-Log "  vCenter: $($item.vCenter) | VM: $($item.VMName)" "WARNING"
+        }
+        Write-Log ""
+    }
+    
+    # Output failed VM list
+    if ($failedList.Count -gt 0) {
+        Write-Log "Failed VMs List:" "ERROR"
+        Write-Log "=================================================================" "INFO"
+        foreach ($item in $failedList) {
+            Write-Log "  vCenter: $($item.vCenter) | VM: $($item.VMName)" "ERROR"
+        }
+        Write-Log ""
+    }
+    
+    Write-Log "=================================================================" "INFO"
+    Write-Log "Detailed log available at: $LogFile" "INFO"
+    Write-Log "=================================================================" "INFO"
 }
 
 # 执行主函数
