@@ -190,6 +190,15 @@ function Main {
             
             Write-Log "Found $($vmsToStart.Count) VMs to start in $($vCenter.Name)"
             
+            # For vCenter2, prioritize VMs with "svm" in the name
+            if ($vCenter.Name -eq "vCenter2") {
+                Write-Log "Processing vCenter2: Prioritizing VMs with 'svm' keyword first"
+                $svmVMs = $vmsToStart | Where-Object { $_.Name.ToLower() -like "*svm*" }
+                $otherVMs = $vmsToStart | Where-Object { $_.Name.ToLower() -notlike "*svm*" }
+                $vmsToStart = $svmVMs + $otherVMs
+                Write-Log "Priority order: $($svmVMs.Count) SVM VMs, then $($otherVMs.Count) other VMs"
+            }
+            
             # Process each VM
             foreach ($vm in $vmsToStart) {
                 $totalProcessed++
