@@ -1,0 +1,39 @@
+cat <<EOF | oc apply -f -
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 98-master-no-ssh-managed
+  labels:
+    machineconfiguration.openshift.io/role: master
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+      - path: /home/core/.ssh/authorized_keys
+        overwrite: false
+        mode: 0600
+        contents:
+          source: data:,   # empty data, so MCO ignores
+EOF
+
+cat <<EOF | oc apply -f -
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 98-worker-no-ssh-managed
+  labels:
+    machineconfiguration.openshift.io/role: worker
+spec:
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+      - path: /home/core/.ssh/authorized_keys
+        overwrite: false
+        mode: 0600
+        contents:
+          source: data:,
+EOF
