@@ -1,0 +1,163 @@
+---
+- name: Get ESXi Volume Mode Information
+  hosts: localhost
+  gather_facts: false
+  vars:
+    vcenter_hostname: "vcenter.example.com"
+    vcenter_username: "administrator@vsphere.local"
+    vcenter_password: "your_password"
+    esxi_username: "root"
+    esxi_password: "your_esxi_password"
+    validate_certs: false
+    results: []
+  
+  tasks:
+    - name: Connect to vCenter and get all ESXi hosts
+      community.vmware.vmware_host_facts:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vcenter_hosts
+      delegate_to: localhost
+
+    - name: Display found ESXi hosts
+      ansible.builtin.debug:
+        msg: "Found {{ vcenter_hosts.hosts | length }} ESXi hosts"
+
+    - name: Check and enable SSH service on each ESXi host
+      community.vmware.vmware_host_service_manager:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ validate_certs }}"
+        esxi_hostname: "{{ item.name }}"
+        service_name: TSM-SSH
+        state: started
+      loop: "{{ vcenter_hosts.hosts }}"
+      loop_control:
+        loop_var: item
+      register: ssh_status
+      ignore_errors: true
+      changed_when: false
+
+    - name: Prepare ESXi hosts list with connection info
+      set_fact:
+        esxi_hosts: "{{ esxi_hosts | default([]) + [{
+          'hostname': item.name,
+          'ip': item.ip_address | default(item.name),
+          'username': esxi_username,
+          'password': esxi_password
+        }] }}"
+      loop: "{{ vcenter_hosts.hosts }}"
+      loop_control:
+        loop_var: item
+
+    - name: List volumes under /vmfs/volumes on each ESXi host
+      ansible.builtin.shell: |
+        sshpass -p {{ item.password }} ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        {{ item.username }}@{{ item.ip }} \
+        "ls -1 /vmfs/volumes 2>/dev/null || echo ''"
+      register: volumes_output
+      loop: "{{ esxi_hosts }}"
+      loop_control:
+        loop_var: item
+      changed_when: false
+      failed_when: false
+
+    - name: Build volume data structure for filtering
+      set_fact:
+        host_volumes: "{{ host_volumes | default({}) | combine({item.item.hostname: {
+          'hostname': item.item.hostname,
+          'ip': item.item.ip,
+          'username': item.item.username,
+          'password': item.item.password,
+          'volumes': item.stdout_lines | default([]) | select('match', '^E:.*') | list
+        }}) }}"
+      loop: "{{ volumes_output.results | default([]) }}"
+      loop_control:
+        loop_var: item
+      when:
+        - item.stdout is defined
+        - item.rc == 0
+
+    - name: Initialize filtered volumes list
+      set_fact:
+        filtered_volumes: []
+
+    - name: Flatten filtered volumes list
+      set_fact:
+        filtered_volumes: "{{ filtered_volumes + [{
+          'host': host_volumes[host_key].hostname,
+          'host_ip': host_volumes[host_key].ip,
+          'username': host_volumes[host_key].username,
+          'password': host_volumes[host_key].password,
+          'volume': volume_item
+        }] }}"
+      vars:
+        host_key: "{{ host_name }}"
+      loop: "{{ host_volumes[host_name].volumes }}"
+      loop_control:
+        loop_var: volume_item
+      vars:
+        host_name: "{{ item }}"
+      loop: "{{ host_volumes.keys() | list }}"
+      when: host_volumes[item].volumes | length > 0
+
+    - name: Display filtered volumes count
+      ansible.builtin.debug:
+        msg: "Found {{ filtered_volumes | default([]) | length }} volumes starting with 'E:'"
+
+    - name: Run vmkfstools command on each filtered volume
+      ansible.builtin.shell: |
+        sshpass -p {{ item.password }} ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        {{ item.username }}@{{ item.host_ip }} \
+        "vmkfstools -Ph -v1 /vmfs/volumes/{{ item.volume | quote }} 2>&1"
+      register: vmkfstools_output
+      loop: "{{ filtered_volumes | default([]) }}"
+      loop_control:
+        loop_var: item
+      changed_when: false
+      failed_when: false
+
+    - name: Extract Mode line from vmkfstools output
+      set_fact:
+        results: "{{ results + [{
+          'host': item.item.host,
+          'volume': item.item.volume,
+          'mode': mode_value
+        }] }}"
+      loop: "{{ vmkfstools_output.results | default([]) }}"
+      loop_control:
+        loop_var: item
+      vars:
+        stdout_lines: "{{ item.stdout_lines | default([]) }}"
+        mode_line: "{{ stdout_lines | select('match', '^Mode:.*') | list | first | default('') }}"
+        mode_value: "{{ mode_line | regex_replace('^Mode:\\s*', '') | default('N/A') }}"
+      when:
+        - item.stdout is defined
+        - mode_line != ""
+
+    - name: Create CSV output file
+      ansible.builtin.copy:
+        content: |
+          host,volume,mode
+          {% for result in results %}
+          {{ result.host }},{{ result.volume }},{{ result.mode }}
+          {% endfor %}
+        dest: "./esxi_volume_mode_results.csv"
+      delegate_to: localhost
+      when: results | length > 0
+
+    - name: Display results summary
+      ansible.builtin.debug:
+        msg: "Processed {{ results | length }} volumes. Results saved to esxi_volume_mode_results.csv"
+
+    - name: Display all results
+      ansible.builtin.debug:
+        var: results
+      when: results | length > 0
