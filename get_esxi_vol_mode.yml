@@ -33,31 +33,34 @@
       set_fact:
         volume_results: []
 
-    - name: Run vmkfstools command on each filtered volume and extract Mode
-      block:
-        - name: Run vmkfstools command
-          ansible.builtin.shell: vmkfstools -Ph -v1 /vmfs/volumes/{{ volume_name | quote }} 2>&1
-          register: vmkfstools_result
-          changed_when: false
-          failed_when: false
-
-        - name: Extract Mode line from vmkfstools output
-          set_fact:
-            volume_results: "{{ volume_results + [{
-              'vcenter': vcenter_hostname,
-              'esxi': inventory_hostname,
-              'volume': volume_name,
-              'mode': mode_value
-            }] }}"
-          vars:
-            stdout_lines: "{{ vmkfstools_result.stdout_lines | default([]) }}"
-            mode_line: "{{ stdout_lines | select('match', '^Mode:.*') | list | first | default('') }}"
-            mode_value: "{{ mode_line | regex_replace('^Mode:\\s*', '') | default('N/A') }}"
-          when: mode_line != ""
+    - name: Run vmkfstools command on each filtered volume
+      ansible.builtin.shell: vmkfstools -Ph -v1 /vmfs/volumes/{{ volume_name | quote }} 2>&1
+      register: vmkfstools_output
       loop: "{{ filtered_volumes }}"
       loop_control:
         loop_var: volume_name
+      changed_when: false
+      failed_when: false
       when: filtered_volumes | length > 0
+
+    - name: Extract Mode line from vmkfstools output
+      set_fact:
+        volume_results: "{{ volume_results + [{
+          'vcenter': vcenter_hostname,
+          'esxi': inventory_hostname,
+          'volume': item.item,
+          'mode': mode_value
+        }] }}"
+      vars:
+        stdout_lines: "{{ item.stdout_lines | default([]) }}"
+        mode_line: "{{ stdout_lines | select('match', '^Mode:.*') | list | first | default('') }}"
+        mode_value: "{{ mode_line | regex_replace('^Mode:\\s*', '') | default('N/A') }}"
+      loop: "{{ vmkfstools_output.results | default([]) }}"
+      loop_control:
+        loop_var: item
+      when:
+        - filtered_volumes | length > 0
+        - mode_line != ""
 
     - name: Collect results from all hosts
       set_fact:
