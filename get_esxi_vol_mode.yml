@@ -44,11 +44,12 @@
       when: filtered_volumes | length > 0
 
     - name: Extract Mode line from vmkfstools output
+      no_log: true
       set_fact:
         volume_results: "{{ volume_results + [{
           'vcenter': vcenter_hostname,
           'esxi': inventory_hostname,
-          'volume': item.item,
+          'volume': item.item | default(item.volume_name | default('unknown')),
           'mode': mode_value
         }] }}"
       vars:
@@ -69,17 +70,55 @@
       run_once: true
       delegate_to: localhost
 
-    - name: Create CSV output file
-      ansible.builtin.copy:
-        content: |
-          vcenter,esxi,volume,mode
-          {% for result in final_results | default([]) %}
-          {{ result.vcenter }},{{ result.esxi }},{{ result.volume }},{{ result.mode }}
-          {% endfor %}
-        dest: "./esxi_volume_mode_results.csv"
+    - name: Set CSV file path
+      set_fact:
+        csv_file_path: "./esxi_volume_mode_results.csv"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Check if CSV file already exists
+      ansible.builtin.stat:
+        path: "{{ csv_file_path }}"
+      register: csv_stat
+      run_once: true
+      delegate_to: localhost
+
+    - name: Build CSV data lines from results
+      set_fact:
+        csv_data_lines: "{{ final_results | default([]) | map('regex_replace', '^(.*)$', result_format) | list }}"
+      vars:
+        result_format: "{{ '%s,%s,%s,%s' | format(item.vcenter, item.esxi, item.volume, item.mode) }}"
+      loop: "{{ final_results | default([]) }}"
+      loop_control:
+        loop_var: item
       run_once: true
       delegate_to: localhost
       when: final_results | default([]) | length > 0
+
+    - name: Create CSV file with header if not exists
+      ansible.builtin.copy:
+        content: |
+          vcenter,esxi,volume,mode
+          {% for line in csv_data_lines %}
+          {{ line }}
+          {% endfor %}
+        dest: "{{ csv_file_path }}"
+      when:
+        - final_results | default([]) | length > 0
+        - not csv_stat.stat.exists
+      run_once: true
+      delegate_to: localhost
+
+    - name: Append data lines to existing CSV file (no header)
+      ansible.builtin.shell: |
+        printf '%s\n' {{ csv_data_lines | join(' ') | quote }} >> {{ csv_file_path }}
+      args:
+        executable: /bin/bash
+      when:
+        - final_results | default([]) | length > 0
+        - csv_stat.stat.exists
+      run_once: true
+      delegate_to: localhost
 
     - name: Display results summary
       ansible.builtin.debug:
@@ -98,7 +137,7 @@
       community.vmware.vmware_host_service_manager:
         esxi_hostname: "{{ inventory_hostname }}"
         service_name: TSM-SSH
-        state: stopped
+        state: absent
       delegate_to: localhost
       ignore_errors: true
 
