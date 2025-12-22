@@ -85,9 +85,7 @@
 
     - name: Build CSV data lines from results
       set_fact:
-        csv_data_lines: "{{ final_results | default([]) | map('regex_replace', '^(.*)$', result_format) | list }}"
-      vars:
-        result_format: "{{ '%s,%s,%s,%s' | format(item.vcenter, item.esxi, item.volume, item.mode) }}"
+        csv_data_lines: "{{ (csv_data_lines | default([])) + ['%s,%s,%s,%s' | format(item.vcenter, item.esxi, item.volume, item.mode)] }}"
       loop: "{{ final_results | default([]) }}"
       loop_control:
         loop_var: item
@@ -111,7 +109,7 @@
 
     - name: Append data lines to existing CSV file (no header)
       ansible.builtin.shell: |
-        printf '%s\n' {{ csv_data_lines | join(' ') | quote }} >> {{ csv_file_path }}
+        printf '%s\n' "{{ csv_data_lines | join('\n') }}" >> {{ csv_file_path }}
       args:
         executable: /bin/bash
       when:
