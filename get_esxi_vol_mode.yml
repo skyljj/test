@@ -161,3 +161,22 @@
       ansible.builtin.debug:
         var: results
       when: results | length > 0
+
+    - name: Disable SSH service on all ESXi hosts
+      community.vmware.vmware_host_service_manager:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ validate_certs }}"
+        esxi_hostname: "{{ item.name }}"
+        service_name: TSM-SSH
+        state: stopped
+      loop: "{{ vcenter_hosts.hosts }}"
+      loop_control:
+        loop_var: item
+      ignore_errors: true
+      delegate_to: localhost
+
+    - name: Display SSH disabled message
+      ansible.builtin.debug:
+        msg: "SSH service has been disabled on all ESXi hosts"
