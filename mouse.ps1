@@ -1,5 +1,5 @@
 # PowerShell Script: Mouse Mover and Teams Activity Simulator
-# Function: Prevent system sleep and Teams away status on Windows 11
+# Function: Simulate mouse and keyboard activity to prevent Teams away status on Windows 11
 # Usage: .\mouse-mover.ps1 [-Interval <seconds>] [-MoveDistance <pixels>]
 
 param(
@@ -62,41 +62,8 @@ function Move-MouseSlightly {
     }
 }
 
-# Function to prevent system sleep
-function Set-PreventSleep {
-    # Prevent display from turning off
-    powercfg /change monitor-timeout-ac 0
-    powercfg /change monitor-timeout-dc 0
-    
-    # Prevent system from sleeping
-    powercfg /change standby-timeout-ac 0
-    powercfg /change standby-timeout-dc 0
-    
-    # Prevent disk from turning off
-    powercfg /change disk-timeout-ac 0
-    powercfg /change disk-timeout-dc 0
-}
-
-# Function to restore original power settings
-function Restore-PowerSettings {
-    Write-Host "Restoring original power settings..." -ForegroundColor Yellow
-    # Restore default settings (you may want to customize these)
-    powercfg /change monitor-timeout-ac 10
-    powercfg /change monitor-timeout-dc 5
-    powercfg /change standby-timeout-ac 30
-    powercfg /change standby-timeout-dc 15
-    powercfg /change disk-timeout-ac 0
-    powercfg /change disk-timeout-dc 0
-}
-
-# Setup signal handler for graceful exit
-$null = Register-EngineEvent PowerShell.Exiting -Action {
-    Restore-PowerSettings
-}
-
-# Trap Ctrl+C
+# Trap Ctrl+C for graceful exit
 $null = Register-ObjectEvent -InputObject ([System.Console]) -EventName CancelKeyPress -Action {
-    Restore-PowerSettings
     exit
 }
 
@@ -106,12 +73,8 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Interval: $Interval seconds" -ForegroundColor Green
 Write-Host "Move Distance: $MoveDistance pixels" -ForegroundColor Green
 Write-Host ""
-Write-Host "Press Ctrl+C to stop and restore settings" -ForegroundColor Yellow
+Write-Host "Press Ctrl+C to stop" -ForegroundColor Yellow
 Write-Host ""
-
-# Prevent system sleep
-Set-PreventSleep
-Write-Host "Power settings configured to prevent sleep" -ForegroundColor Green
 
 # Main loop
 $counter = 0
@@ -136,7 +99,6 @@ try {
 } catch {
     Write-Host "`nError occurred: $($_.Exception.Message)" -ForegroundColor Red
 } finally {
-    Restore-PowerSettings
-    Write-Host "`nScript stopped. Power settings restored." -ForegroundColor Yellow
+    Write-Host "`nScript stopped." -ForegroundColor Yellow
 }
 
