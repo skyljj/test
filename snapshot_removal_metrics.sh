@@ -29,17 +29,24 @@ fi
 #####################################
 # 2. Parse PLAY RECAP for failed VMs
 #####################################
+
+FAILED_VM_COUNT=0
+
 grep -E '^[^[:space:]]+ *:.*failed=[1-9]' "$LOG_FILE" | while read -r line; do
-  # 提取 VM 名称（冒号前）
+  # VM 名称（冒号前）
   VM=$(echo "$line" | awk -F':' '{print $1}' | xargs)
 
-  # 提取 failed 数
+  # failed 数量
   FAILED=$(echo "$line" | sed -n 's/.*failed=\([0-9]\+\).*/\1/p')
 
   if [[ "$FAILED" -ge 1 ]]; then
     echo "snapshot_removal_vm{vc=\"$VC\",vm=\"$VM\"} 0" >> "$TMP_FILE"
+    ((FAILED_VM_COUNT++))
   fi
 done
+
+# 输出总失败 VM 数
+echo "snapshot_removal_total_failed_vm{vc=\"$VC\"} $FAILED_VM_COUNT" >> "$TMP_FILE"
 
 #####################################
 # 3. Execution time
