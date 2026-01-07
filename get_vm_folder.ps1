@@ -6,7 +6,9 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$LogFile = "vm_folder_info_log.txt",
     [Parameter(Mandatory=$false)]
-    [string]$OutputCSV = "vm_folder_info.csv"
+    [string]$OutputCSV = "vm_folder_info.csv",
+    [Parameter(Mandatory=$false)]
+    [string]$SummaryCSV = "vm_folder_summary.csv"
 )
 
 # 导入VMware PowerCLI模块
@@ -22,12 +24,7 @@ try {
 Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
 Set-PowerCLIConfiguration -DefaultVIServerMode Multiple -Confirm:$false
 
-# 定义需要处理的vCenter列表 - 只有在此配置的vCenter才会被处理
-$vCentersToProcess = @(
-    "vCenter1",
-    "vCenter2"
-    # 可在此添加更多 vCenter 名称
-)
+
 
 # vCenter服务器配置
 $vCenters = @(
@@ -248,21 +245,20 @@ function Main {
     Write-Log "Starting VM folder information collection task"
     Write-Log "Log file: $LogFile"
     Write-Log "Output CSV file: $OutputCSV"
+    Write-Log "Summary CSV file: $SummaryCSV"
     
     # 初始化结果数组
     $vmInfoList = @()
+    
+    # 初始化统计字典
+    $summaryDict = @{}
     
     $totalProcessed = 0
     $totalSuccess = 0
     $totalFailed = 0
     
     foreach ($vCenter in $vCenters) {
-        # 检查是否在需要处理的vCenter列表中
-        if ($vCenter.Name -notin $vCentersToProcess) {
-            Write-Log "vCenter $($vCenter.Name) not in processing list, skipping" "INFO"
-            continue
-        }
-        
+
         Write-Log "Processing vCenter: $($vCenter.Name)"
         
         # 连接到vCenter
@@ -311,6 +307,14 @@ function Main {
                     $vmInfoList += $vmInfo
                     $totalSuccess++
                     
+                    # 更新统计信息
+                    $summaryKey = "$($vCenter.Name)|$($folderInfo.folder_prefix)|$($folderInfo.env)"
+                    if ($summaryDict.ContainsKey($summaryKey)) {
+                        $summaryDict[$summaryKey]++
+                    } else {
+                        $summaryDict[$summaryKey] = 1
+                    }
+                    
                     Write-Log "  - VM: $vmName | PowerStatus: $powerStatus | Folder: $folderPath | Prefix: $($folderInfo.folder_prefix) | Env: $($folderInfo.env)" "INFO"
                 } catch {
                     $totalFailed++
@@ -354,6 +358,33 @@ function Main {
         Write-Log "No VM information collected, CSV file not created" "WARNING"
     }
     
+    # 生成统计CSV
+    if ($summaryDict.Count -gt 0) {
+        try {
+            $summaryList = @()
+            foreach ($key in $summaryDict.Keys) {
+                $parts = $key.Split("|")
+                $summaryInfo = [PSCustomObject]@{
+                    vc = $parts[0]
+                    folder_prefix = $parts[1]
+                    env = $parts[2]
+                    total_num = $summaryDict[$key]
+                }
+                $summaryList += $summaryInfo
+            }
+            
+            # 按vc, folder_prefix, env排序
+            $summaryList = $summaryList | Sort-Object vc, folder_prefix, env
+            
+            $summaryList | Export-Csv -Path $SummaryCSV -NoTypeInformation -Encoding UTF8
+            Write-Log "Successfully exported $($summaryList.Count) summary records to $SummaryCSV" "SUCCESS"
+        } catch {
+            Write-Log "Error exporting summary to CSV: $($_.Exception.Message)" "ERROR"
+        }
+    } else {
+        Write-Log "No summary information collected, summary CSV file not created" "WARNING"
+    }
+    
     # Output summary
     Write-Log ""
     Write-Log "=================================================================" "INFO"
@@ -363,6 +394,7 @@ function Main {
     Write-Log "Successfully collected: $totalSuccess"
     Write-Log "Failed: $totalFailed"
     Write-Log "Output CSV file: $OutputCSV"
+    Write-Log "Summary CSV file: $SummaryCSV"
     Write-Log ""
     Write-Log "=================================================================" "INFO"
     Write-Log "Detailed log available at: $LogFile" "INFO"
