@@ -5,3 +5,16 @@
       - "Tower user id: {{ tower_user_id | default('unknown') }}"
       - "Job id: {{ tower_job_id | default('unknown') }}"
       - "Job template id: {{ tower_job_template_id | default('unknown') }}"
+
+
+- name: Configure chrony
+  k8s:
+    state: present
+    definition:
+      apiVersion: config.openshift.io/v1
+      kind: ChronyConfig
+      metadata:
+        name: cluster
+      spec:
+        servers:
+          - {{ my_chrony_server }}
