@@ -1,0 +1,7 @@
+- name: Print Tower execution context
+  debug:
+    msg:
+      - "Tower user name: {{ tower_user_name | default('unknown') }}"
+      - "Tower user id: {{ tower_user_id | default('unknown') }}"
+      - "Job id: {{ tower_job_id | default('unknown') }}"
+      - "Job template id: {{ tower_job_template_id | default('unknown') }}"
