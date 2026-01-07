@@ -135,7 +135,45 @@ function Parse-FolderInfo {
         if ($folderPath.Contains("/")) {
             $pathParts = $folderPath.Split("/")
             
-            # 从后往前查找包含下划线的部分（优先匹配更接近VM的部分）
+            # 优先查找路径中是否包含以"ova"开头的部分（不区分大小写）
+            $ovaPart = $null
+            foreach ($part in $pathParts) {
+                if ($part.Contains("_")) {
+                    $subParts = $part.Split("_")
+                    if ($subParts.Length -gt 0 -and $subParts[0].ToLower().StartsWith("ova")) {
+                        $ovaPart = $part
+                        break
+                    }
+                }
+            }
+            
+            # 如果找到了ova开头的部分，优先使用它
+            if ($null -ne $ovaPart) {
+                $subParts = $ovaPart.Split("_")
+                $prefix = "OVA"  # 统一使用OVA
+                
+                # 查找环境关键词（不区分大小写）
+                $env = ""
+                for ($j = 1; $j -lt $subParts.Length; $j++) {
+                    $subPart = $subParts[$j].ToLower()
+                    foreach ($keyword in $envKeywords) {
+                        if ($subPart -eq $keyword) {
+                            $env = $keyword
+                            break
+                        }
+                    }
+                    if ($env) {
+                        break
+                    }
+                }
+                
+                return @{
+                    folder_prefix = $prefix
+                    env = $env
+                }
+            }
+            
+            # 如果没有找到ova开头的部分，从后往前查找包含下划线的部分（优先匹配更接近VM的部分）
             for ($i = $pathParts.Length - 1; $i -ge 0; $i--) {
                 $part = $pathParts[$i]
                 
@@ -192,8 +230,12 @@ function Parse-FolderInfo {
             if ($folderName.Contains("_")) {
                 $parts = $folderName.Split("_")
                 
-                # 第一部分作为前缀
-                $prefix = $parts[0]
+                # 检查是否以ova开头（不区分大小写）
+                if ($parts[0].ToLower().StartsWith("ova")) {
+                    $prefix = "OVA"  # 统一使用OVA
+                } else {
+                    $prefix = $parts[0]
+                }
                 
                 # 查找环境关键词（不区分大小写）
                 $env = ""
