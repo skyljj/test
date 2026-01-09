@@ -1,0 +1,74 @@
+---
+- name: Get ESXi Volume Mode Information
+  hosts: all
+  gather_facts: false
+  vars:
+    vcenter_hostname: "{{ lookup('env', 'VCENTER_HOSTNAME') }}"
+    vcenter_username: "{{ lookup('env', 'VCENTER_USERNAME') }}"
+    vcenter_password: "{{ lookup('env', 'VCENTER_PASSWORD') }}"
+    validate_certs: "{{ lookup('env', 'VCENTER_VALIDATE_CERTS') | default('false') | bool }}"
+    ansible_password: "{{ lookup('env', 'ESXI_PASSWORD') }}"
+  
+  tasks:
+    - name: set default
+      set_fact:
+        esxi_config_drift: "{{ esxi_config_drift | default('') | combine({ inventory_hostname: {'localsvc': 0 } }) }}"
+    - name: Enable SSH service on ESXi host
+      community.vmware.vmware_host_service_manager:
+        esxi_hostname: "{{ inventory_hostname }}"
+        service_name: TSM-SSH
+        state: present
+      delegate_to: localhost
+      ignore_errors: true
+      changed_when: false
+
+    - name: load esxi_cfg
+      run_once: true
+      include_tasks: esxi_cfg.yml
+
+    - name: Get current advanced values
+      shell: |
+        esxcli system settings advanced list -o {{ item }}
+      register: adv_out
+      loop: "{{ esxi_cfg.keys() }}"
+      failed_when: false
+      changed_when: false
+
+    - name: Check if configuration values match expected
+      set_fact:
+        config_mismatch: "{{ config_mismatch | default(false) or (current_int_value | string != esxi_cfg[item.item] | string) }}"
+      vars:
+        int_value_line: "{{ item.stdout_lines | default([]) | select('match', '^\\s*IntValue\\s*:') | list | first | default('') }}"
+        current_int_value: "{{ int_value_line | regex_replace('^\\s*IntValue\\s*:\\s*(.*)$', '\\1') | trim }}"
+        expected_value: "{{ esxi_cfg[item.item] | string }}"
+      loop: "{{ adv_out.results | default([]) }}"
+      when: 
+        - item.rc == 0
+        - item.stdout_lines is defined
+        - item.item in esxi_cfg.keys()
+
+    - name: Report configuration mismatches
+      debug:
+        msg: "MISMATCH: {{ item.item }} - Expected: {{ esxi_cfg[item.item] }}, Current: {{ current_int_value }}"
+      vars:
+        int_value_line: "{{ item.stdout_lines | default([]) | select('match', '^\\s*IntValue\\s*:') | list | first | default('') }}"
+        current_int_value: "{{ int_value_line | regex_replace('^\\s*IntValue\\s*:\\s*(.*)$', '\\1') | trim }}"
+      loop: "{{ adv_out.results | default([]) }}"
+      when: 
+        - item.rc == 0
+        - item.stdout_lines is defined
+        - item.item in esxi_cfg.keys()
+        - (current_int_value | string) != (esxi_cfg[item.item] | string)
+
+    - name: Compare current values with expected
+      set_fact:
+        esxi_config_drift: "{{ esxi_config_drift | default('') | combine({ inventory_hostname: {'localsvc': 1 } }) }}"
+      when: config_mismatch | default(false) | bool
+
+    - name: Disable SSH service on ESXi host
+      community.vmware.vmware_host_service_manager:
+        esxi_hostname: "{{ inventory_hostname }}"
+        service_name: TSM-SSH
+        state: absent
+      delegate_to: localhost
+      ignore_errors: true
