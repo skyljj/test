@@ -18,3 +18,38 @@
       spec:
         servers:
           - {{ my_chrony_server }}
+
+
+- name: Normalize ESXi services to dict
+  set_fact:
+    esxi_services: >-
+      {{
+        dict(
+          host_services.host_service_info[inventory_hostname]
+          | map(attribute='key')
+          | zip(host_services.host_service_info[inventory_hostname])
+        )
+      }}
+
+
+- name: Service policy compliance check
+  set_fact:
+    Compliant: false
+  loop: "{{ service | dict2items }}"
+  when:
+    - item.key not in esxi_services
+      or
+      esxi_services[item.key].policy != item.value.policy
+      or
+      esxi_services[item.key].running != item.value.running
+
+- name: Collect non-compliant services
+  set_fact:
+    non_compliant_services: "{{ non_compliant_services | default([]) + [ item.key ] }}"
+  loop: "{{ service | dict2items }}"
+  when:
+    - item.key not in esxi_services
+      or
+      esxi_services[item.key].policy != item.value.policy
+      or
+      esxi_services[item.key].running != item.value.running
