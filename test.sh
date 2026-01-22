@@ -26,3 +26,9 @@ else
   echo "playbook failed, rc=$rc"
   exit 1
 fi
+
+
+for f in *-admin-kubeconfig.yaml; do
+  ns=$(grep '^  name:' "$f" | head -1 | awk '{print $2}')
+  oc get ns "$ns" >/dev/null 2>&1 || oc create ns "$ns"
+done
