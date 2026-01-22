@@ -13,3 +13,16 @@ for ns in $(oc get managedclusters -o jsonpath='{.items[*].metadata.name}'); do
 done
 
 oc apply -f *-admin-kubeconfig.yaml
+
+
+#!/bin/bash
+
+ansible-playbook site.yml
+rc=$?
+
+if [ $rc -eq 0 ]; then
+  echo "playbook succeeded"
+else
+  echo "playbook failed, rc=$rc"
+  exit 1
+fi
