@@ -53,3 +53,64 @@
       esxi_services[item.key].policy != item.value.policy
       or
       esxi_services[item.key].running != item.value.running
+
+
+
+- name: Print NIC details
+  debug:
+    msg:
+      label: "{{ vm_info.instance['hw_' ~ item].label }}"
+      mac: "{{ vm_info.instance['hw_' ~ item].macaddress }}"
+      portgroup: >-
+        {{
+          vm_info.instance['hw_' ~ item].portgroup_key
+          | default(vm_info.instance['hw_' ~ item].network_name)
+        }}
+  loop: "{{ vm_info.instance.hw_interfaces }}"
+
+
+- name: Collect NIC definitions
+  set_fact:
+    nic_definitions: >-
+      {{
+        nic_definitions | default([]) + [
+          {
+            'label': vm_info.instance['hw_' ~ item].label,
+            'mac': vm_info.instance['hw_' ~ item].macaddress,
+            'network': (
+              vm_info.instance['hw_' ~ item].portgroup_key
+              | default(vm_info.instance['hw_' ~ item].network_name)
+            ),
+            'type': vm_info.instance['hw_' ~ item].type,
+            'connected': vm_info.instance['hw_' ~ item].connected | default(true),
+            'start_connected': vm_info.instance['hw_' ~ item].start_connected | default(true)
+          }
+        ]
+      }}
+  loop: "{{ vm_info.instance.hw_interfaces }}"
+
+- name: Re-add NICs to VM
+  vmware_guest:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: false
+    datacenter: "{{ datacenter }}"
+    folder: "{{ folder }}"
+    name: "{{ vm_name }}"
+    state: present
+    networks:
+      - name: "{{ item.network }}"
+        mac: "{{ item.mac }}"
+        device_type: "{{ item.type }}"
+        connected: "{{ item.connected }}"
+        start_connected: "{{ item.start_connected }}"
+  loop: "{{ nic_definitions }}"
+
+
+- name: Restore normal boot order
+  vmware_guest:
+    ...
+    boot_order:
+      - disk
+      - network
