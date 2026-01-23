@@ -89,22 +89,20 @@
       }}
   loop: "{{ vm_info.instance.hw_interfaces }}"
 
-- name: Re-add NICs to VM
-  vmware_guest:
+- name: Re-add original NICs with same MAC
+  community.vmware.vmware_guest_network:
     hostname: "{{ vcenter_hostname }}"
     username: "{{ vcenter_username }}"
     password: "{{ vcenter_password }}"
     validate_certs: false
     datacenter: "{{ datacenter }}"
-    folder: "{{ folder }}"
     name: "{{ vm_name }}"
     state: present
-    networks:
-      - name: "{{ item.network }}"
-        mac: "{{ item.mac }}"
-        device_type: "{{ item.type }}"
-        connected: "{{ item.connected }}"
-        start_connected: "{{ item.start_connected }}"
+    network_name: "{{ item.network }}"
+    mac_address: "{{ item.mac }}"
+    device_type: "{{ item.type }}"
+    connected: "{{ item.connected | default(true) }}"
+    start_connected: "{{ item.start_connected | default(true) }}"
   loop: "{{ nic_definitions }}"
 
 
