@@ -61,13 +61,8 @@
     msg:
       label: "{{ vm_info.instance['hw_' ~ item].label }}"
       mac: "{{ vm_info.instance['hw_' ~ item].macaddress }}"
-      portgroup: >-
-        {{
-          vm_info.instance['hw_' ~ item].portgroup_key
-          | default(vm_info.instance['hw_' ~ item].network_name)
-        }}
+      portgroup: "{{ vm_info.instance['hw_' ~ item].portgroup_key }}"
   loop: "{{ vm_info.instance.hw_interfaces }}"
-
 
 - name: Collect NIC definitions
   set_fact:
@@ -77,17 +72,22 @@
           {
             'label': vm_info.instance['hw_' ~ item].label,
             'mac': vm_info.instance['hw_' ~ item].macaddress,
-            'network': (
-              vm_info.instance['hw_' ~ item].portgroup_key
-              | default(vm_info.instance['hw_' ~ item].network_name)
-            ),
-            'type': vm_info.instance['hw_' ~ item].type,
-            'connected': vm_info.instance['hw_' ~ item].connected | default(true),
-            'start_connected': vm_info.instance['hw_' ~ item].start_connected | default(true)
+            'portgroup': vm_info.instance['hw_' ~ item].portgroup_key
           }
         ]
       }}
   loop: "{{ vm_info.instance.hw_interfaces }}"
+
+- name: Fail if Network adapter 1 already exists
+  fail:
+    msg: "Unexpected Network adapter 1 found before PXE reprovision"
+  when: >
+    nic_definitions
+    | selectattr('label', 'equalto', 'Network adapter 1')
+    | list
+    | length > 0
+    
+
 
 - name: Re-add original NICs with same MAC
   community.vmware.vmware_guest_network:
