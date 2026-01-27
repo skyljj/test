@@ -8,7 +8,32 @@
       Content-Type: "application/json"
 
   tasks:
+- name: Record workflow launch anchor time
+  set_fact:
+    launch_anchor_time: "{{ lookup('pipe', 'date -u +%Y-%m-%dT%H:%M:%SZ') }}"
 
+- name: Query workflow jobs for template (after launch time)
+  uri:
+    url: >-
+      {{ tower_url }}/api/v2/workflow_jobs/
+      ?workflow_job_template={{ workflow_template_id }}
+      &order_by=-created
+    method: GET
+    headers: "{{ headers }}"
+    return_content: true
+    validate_certs: false
+  register: workflow_jobs
+  until: >
+    (
+      workflow_jobs.json.results
+      | selectattr('limit', 'equalto', limit_host)
+      | selectattr('created', '>=', launch_anchor_time)
+      | list
+      | length
+    ) > 0
+  retries: "{{ poll_retries }}"
+  delay: "{{ poll_interval }}"
+  
     - name: Query workflow jobs for template
       uri:
         url: >-
