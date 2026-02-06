@@ -92,3 +92,39 @@
     - name: Workflow job succeeded
       debug:
         msg: "Workflow job {{ matched_job.id }} completed successfully"
+
+
+- name: Workflow retry loop
+  until: workflow_final_status == 'successful'
+  retries: "{{ max_retries }}"
+  delay: 0
+  block:
+
+    - name: Launch workflow
+      uri:
+        url: "{{ tower_url }}/api/v2/workflow_job_templates/{{ workflow_template_id }}/launch/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ tower_token }}"
+        return_content: true
+        validate_certs: false
+      register: launch_result
+
+    - name: Wait for workflow
+      uri:
+        url: "{{ tower_url }}/api/v2/workflow_jobs/{{ launch_result.json.id }}/"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ tower_token }}"
+        return_content: true
+      register: workflow_status
+      until: workflow_status.json.status in
+        - successful
+        - failed
+        - error
+        - canceled
+      retries: "{{ poll_retries }}"
+      delay: "{{ poll_interval }}"
+
+    - set_fact:
+        workflow_final_status: "{{ workflow_status.json.status }}"
