@@ -93,7 +93,26 @@
       debug:
         msg: "Workflow job {{ matched_job.id }} completed successfully"
 
+- name: Search for Tower workflows matching 'name_icontains'
+  uri:
+    url: "{{ tower_api_url }}/workflow_job_templates/?name__icontains={{ search_workflow_name }}"
+    method: GET
+    headers: "{{ tower_headers }}"
+    validate_certs: "{{ tower_validate_certs | default(false) }}"
+    return_content: yes
+    status_code: [200]
+  register: tower_workflow_search
+  delegate_to: localhost
 
+- name: Set list of matched workflows
+  set_fact:
+    matched_workflows: "{{ tower_workflow_search.json.results | default([]) }}"
+
+- name: Print matched workflows (name and id)
+  debug:
+    msg: "Workflow name: {{ item.name }}, Workflow id: {{ item.id }}"
+  loop: "{{ matched_workflows }}"
+  
 - name: Workflow retry loop
   until: workflow_final_status == 'successful'
   retries: "{{ max_retries }}"
