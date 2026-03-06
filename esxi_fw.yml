@@ -1,0 +1,103 @@
+---
+- name: Export normalized ESXi firewall baseline
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    vcenter_hostname: "{{ lookup('env','VCENTER_HOST') }}"
+    vcenter_username: "{{ lookup('env','VCENTER_USER') }}"
+    vcenter_password: "{{ lookup('env','VCENTER_PASS') }}"
+    esxi_hostname: "{{ baseline_esxi }}"
+
+    baseline_file: "./baseline_firewall.yml"
+
+  tasks:
+
+    - name: Get ESXi firewall info
+      community.vmware.vmware_host_firewall_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        esxi_hostname: "{{ esxi_hostname }}"
+        validate_certs: false
+      register: firewall_raw
+
+    - name: Normalize firewall rules
+      set_fact:
+        firewall_baseline: >-
+          {{
+            firewall_raw.firewall_info
+            | dict2items
+            | selectattr('value.enabled','equalto',true)
+            | map(
+                'combine',
+                {
+                  'value': {
+                    'rules':
+                      (item.value.rules
+                       | selectattr('direction','equalto','inbound')
+                       | list)
+                  }
+                }
+              )
+            | list
+          }}
+
+    - name: Convert back to dict
+      set_fact:
+        firewall_baseline: "{{ firewall_baseline | items2dict }}"
+
+    - name: Save firewall baseline
+      copy:
+        dest: "{{ baseline_file }}"
+        content: |
+          firewall_baseline:
+          {{ firewall_baseline | to_nice_yaml(indent=2) | indent(2) }}
+
+    - name: Show baseline
+      debug:
+        var: firewall_baseline
+
+
+- name: Get firewall info
+  community.vmware.vmware_host_firewall_info:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    esxi_hostname: "{{ inventory_hostname }}"
+    validate_certs: false
+  register: firewall_current
+
+- name: Filter baseline to match ESXi keys
+  set_fact:
+    filtered_baseline: >-
+      {{
+        firewall_baseline
+        | dict2items
+        | selectattr('key', 'in', firewall_current.firewall_info.keys())
+        | items2dict
+      }}
+
+
+- name: Detect unexpected firewall services
+  set_fact:
+    extra_services: >-
+      {{
+        firewall_current.firewall_info.keys()
+        | difference(firewall_baseline.keys())
+      }}
+
+- name: Compare firewall
+  ansible.utils.fact_diff:
+    before: "{{ filtered_baseline }}"
+    after: "{{ firewall_current.firewall_info }}"
+  register: firewall_diff
+
+- name: Report extra firewall services
+  debug:
+    msg: "Unexpected firewall services: {{ extra_services }}"
+  when: extra_services | length > 0
+
+- name: Show firewall diff
+  debug:
+    var: firewall_diff
