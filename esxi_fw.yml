@@ -101,3 +101,20 @@
 - name: Show firewall diff
   debug:
     var: firewall_diff
+
+
+- name: Normalize firewall baseline
+  set_fact:
+    firewall_baseline: "{{ firewall_baseline | default({}) | combine({
+        item.Key: {
+          'Enabled': item.Enabled,
+          'allowed_hosts': item.allowed_hosts,
+          'Rule': (item.Rule
+                    | selectattr('direction','equalto','inbound')
+                    | sort(attribute='port_begin')
+                    | list)
+        }
+      }) }}"
+  loop: "{{ firewall_raw.hosts_firewall_info[esxi_hostname]
+            | selectattr('Enabled','equalto',true)
+            | list }}"
