@@ -204,7 +204,10 @@ function Get-VMEnvironmentFromFolder {
 # Get target cluster's ESXi hosts and Datastore list
 # Each cluster: DSC-{cluster} (prod/uat), DSC-{cluster}-nonprod (dev/qa)
 function Get-ClusterResources {
-    param([string]$ClusterName)
+    param(
+        [string]$ClusterName,
+        [switch]$DebugDSC = $false
+    )
     if ($script:ClusterResourcesCache.ContainsKey($ClusterName)) {
         return $script:ClusterResourcesCache[$ClusterName]
     }
@@ -214,17 +217,66 @@ function Get-ClusterResources {
         return $null
     }
     $hosts = @(Get-VMHost -Location $cluster -ErrorAction SilentlyContinue | Where-Object { $_.ConnectionState -eq "Connected" } | Sort-Object Name)
+
+    # Get all DatastoreClusters first - Get-DatastoreCluster -Name often returns nothing when DSC is in a different Datacenter
+    $allDSCs = @(Get-DatastoreCluster -ErrorAction SilentlyContinue)
+    if ($DebugDSC) {
+        Write-Log "[DEBUG] All DatastoreClusters in vCenter ($($allDSCs.Count) total): $(($allDSCs | ForEach-Object { $_.Name } | Sort-Object) -join ', ')" "INFO"
+        $allDSCs | ForEach-Object { Write-Log "[DEBUG]   DSC: $($_.Name) | Datacenter: $(try{$_.Parent.Name}catch{'?'}) | Id: $($_.Id)" "INFO" }
+    }
+
     # Datastore Cluster: DSC-core-01 (prod/uat), DSC-core-01-nonprod (dev/qa)
-    $dscProd = Get-DatastoreCluster -Name "DSC-$ClusterName" -ErrorAction SilentlyContinue
-    $dscNonprod = Get-DatastoreCluster -Name "DSC-$ClusterName-Nonprod" -ErrorAction SilentlyContinue
+    # Filter from all DSCs - -Name lookup can fail when DSC is in specific Datacenter
+    $dscProdName = "DSC-$ClusterName"
+    $dscNonprodNames = @("DSC-$ClusterName-nonprod", "DSC-$ClusterName-Nonprod")
+    $dscProd = $allDSCs | Where-Object { $_.Name -eq $dscProdName } | Select-Object -First 1
+    $dscNonprod = $null
+    foreach ($name in $dscNonprodNames) {
+        $dscNonprod = $allDSCs | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+        if ($dscNonprod) { break }
+    }
+
+    if ($DebugDSC) {
+        Write-Log "[DEBUG] DSC prod '$dscProdName': found=$($null -ne $dscProd)$(if($dscProd){", id=$($dscProd.Id)"})" "INFO"
+        Write-Log "[DEBUG] DSC nonprod (tried: $($dscNonprodNames -join ', ')): found=$($null -ne $dscNonprod)$(if($dscNonprod){", id=$($dscNonprod.Id)"})" "INFO"
+    }
+
     $datastoresProd = @()
     $datastoresNonprod = @()
+
+    # Get datastores: use -Location (explicit) as primary, pipe as fallback
     if ($dscProd) {
-        $datastoresProd = @($dscProd | Get-Datastore -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
+        $dsRaw = Get-Datastore -Location $dscProd -ErrorAction SilentlyContinue
+        if ($DebugDSC) {
+            Write-Log "[DEBUG] DSC prod Get-Datastore -Location: raw count=$($dsRaw.Count), names=$(($dsRaw | ForEach-Object { $_.Name }) -join ', ')" "INFO"
+            if ($dsRaw) {
+                $dsRaw | ForEach-Object { Write-Log "[DEBUG]   DS: $($_.Name) State=$($_.State) Id=$($_.Id)" "INFO" }
+            }
+        }
+        $datastoresProd = @($dsRaw | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
+        if ($datastoresProd.Count -eq 0 -and $dsRaw.Count -gt 0) {
+            Write-Log "[DEBUG] DSC prod: $($dsRaw.Count) DS found but 0 with State=Connected. States: $(($dsRaw | ForEach-Object { $_.State } | Select-Object -Unique) -join ', ')" "WARNING"
+        }
+    } else {
+        if ($DebugDSC) { Write-Log "[DEBUG] DSC prod not found, skipping" "INFO" }
     }
+
     if ($dscNonprod) {
-        $datastoresNonprod = @($dscNonprod | Get-Datastore -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
+        $dsRaw = Get-Datastore -Location $dscNonprod -ErrorAction SilentlyContinue
+        if ($DebugDSC) {
+            Write-Log "[DEBUG] DSC nonprod Get-Datastore -Location: raw count=$($dsRaw.Count), names=$(($dsRaw | ForEach-Object { $_.Name }) -join ', ')" "INFO"
+            if ($dsRaw) {
+                $dsRaw | ForEach-Object { Write-Log "[DEBUG]   DS: $($_.Name) State=$($_.State) Id=$($_.Id)" "INFO" }
+            }
+        }
+        $datastoresNonprod = @($dsRaw | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
+        if ($datastoresNonprod.Count -eq 0 -and $dsRaw.Count -gt 0) {
+            Write-Log "[DEBUG] DSC nonprod: $($dsRaw.Count) DS found but 0 with State=Connected" "WARNING"
+        }
+    } else {
+        if ($DebugDSC) { Write-Log "[DEBUG] DSC nonprod not found, skipping" "INFO" }
     }
+
     $result = @{
         Cluster          = $cluster
         Hosts            = $hosts
