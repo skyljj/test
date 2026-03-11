@@ -8,18 +8,14 @@
 # Usage:
 #   .\vm_cluster_rebalance.ps1                    # Default run
 #   .\vm_cluster_rebalance.ps1 -DryRun            # Analyze only, no migration
-#   .\vm_cluster_rebalance.ps1 -BatchSize 3       # 3 VMs per batch
 #   .\vm_cluster_rebalance.ps1 -SkipVerification  # Skip port verification
 #   .\vm_cluster_rebalance.ps1 -NoPrompt          # Auto run, no key prompt
-#   .\vm_cluster_rebalance.ps1 -DebugDSC         # Debug DSC/datastore lookup
 #   .\vm_cluster_rebalance.ps1 -MaxConcurrent 5  # Sliding window: 5 concurrent, start new when any completes
 #   .\vm_cluster_rebalance.ps1 -InterMigrationDelay 60  # Wait 60s after each VM for storage to settle
 
 param(
     [Parameter(Mandatory=$false)]
     [string]$LogFile = "vm_cluster_rebalance_log.txt",
-    [Parameter(Mandatory=$false)]
-    [int]$BatchSize = 5,
     [Parameter(Mandatory=$false)]
     [int]$MaxConcurrentMigrations = 5,
     [Parameter(Mandatory=$false)]
@@ -35,9 +31,7 @@ param(
     [Parameter(Mandatory=$false)]
     [string[]]$ExclusionKeywords = @("vcls", "svm", "hci", "template"),
     [Parameter(Mandatory=$false)]
-    [switch]$NoPrompt = $false,
-    [Parameter(Mandatory=$false)]
-    [switch]$DebugDSC = $false
+    [switch]$NoPrompt = $false
 )
 
 # ============ Configuration - Edit for your environment ============
@@ -217,10 +211,7 @@ function Get-VMEnvironmentFromFolder {
 # Get target cluster's ESXi hosts and Datastore list
 # Each cluster: DSC-{cluster} (prod/uat), DSC-{cluster}-nonprod (dev/qa)
 function Get-ClusterResources {
-    param(
-        [string]$ClusterName,
-        [switch]$DebugDSC = $false
-    )
+    param([string]$ClusterName)
     if ($script:ClusterResourcesCache.ContainsKey($ClusterName)) {
         return $script:ClusterResourcesCache[$ClusterName]
     }
@@ -233,10 +224,6 @@ function Get-ClusterResources {
 
     # Get all DatastoreClusters first - Get-DatastoreCluster -Name often returns nothing when DSC is in a different Datacenter
     $allDSCs = @(Get-DatastoreCluster -ErrorAction SilentlyContinue)
-    if ($DebugDSC) {
-        Write-Log "[DEBUG] All DatastoreClusters in vCenter ($($allDSCs.Count) total): $(($allDSCs | ForEach-Object { $_.Name } | Sort-Object) -join ', ')" "INFO"
-        $allDSCs | ForEach-Object { Write-Log "[DEBUG]   DSC: $($_.Name) | Datacenter: $(try{$_.Parent.Name}catch{'?'}) | Id: $($_.Id)" "INFO" }
-    }
 
     # Datastore Cluster: DSC-core-01 (prod/uat), DSC-core-01-nonprod (dev/qa)
     # Filter from all DSCs - -Name lookup can fail when DSC is in specific Datacenter
@@ -249,45 +236,18 @@ function Get-ClusterResources {
         if ($dscNonprod) { break }
     }
 
-    if ($DebugDSC) {
-        Write-Log "[DEBUG] DSC prod '$dscProdName': found=$($null -ne $dscProd)$(if($dscProd){", id=$($dscProd.Id)"})" "INFO"
-        Write-Log "[DEBUG] DSC nonprod (tried: $($dscNonprodNames -join ', ')): found=$($null -ne $dscNonprod)$(if($dscNonprod){", id=$($dscNonprod.Id)"})" "INFO"
-    }
-
     $datastoresProd = @()
     $datastoresNonprod = @()
 
     # Get datastores: use -Location (explicit) as primary, pipe as fallback
     if ($dscProd) {
         $dsRaw = Get-Datastore -Location $dscProd -ErrorAction SilentlyContinue
-        if ($DebugDSC) {
-            Write-Log "[DEBUG] DSC prod Get-Datastore -Location: raw count=$($dsRaw.Count), names=$(($dsRaw | ForEach-Object { $_.Name }) -join ', ')" "INFO"
-            if ($dsRaw) {
-                $dsRaw | ForEach-Object { Write-Log "[DEBUG]   DS: $($_.Name) State=$($_.State) Id=$($_.Id)" "INFO" }
-            }
-        }
         $datastoresProd = @($dsRaw | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
-        if ($datastoresProd.Count -eq 0 -and $dsRaw.Count -gt 0) {
-            Write-Log "[DEBUG] DSC prod: $($dsRaw.Count) DS found but 0 with State=Connected. States: $(($dsRaw | ForEach-Object { $_.State } | Select-Object -Unique) -join ', ')" "WARNING"
-        }
-    } else {
-        if ($DebugDSC) { Write-Log "[DEBUG] DSC prod not found, skipping" "INFO" }
     }
 
     if ($dscNonprod) {
         $dsRaw = Get-Datastore -Location $dscNonprod -ErrorAction SilentlyContinue
-        if ($DebugDSC) {
-            Write-Log "[DEBUG] DSC nonprod Get-Datastore -Location: raw count=$($dsRaw.Count), names=$(($dsRaw | ForEach-Object { $_.Name }) -join ', ')" "INFO"
-            if ($dsRaw) {
-                $dsRaw | ForEach-Object { Write-Log "[DEBUG]   DS: $($_.Name) State=$($_.State) Id=$($_.Id)" "INFO" }
-            }
-        }
         $datastoresNonprod = @($dsRaw | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
-        if ($datastoresNonprod.Count -eq 0 -and $dsRaw.Count -gt 0) {
-            Write-Log "[DEBUG] DSC nonprod: $($dsRaw.Count) DS found but 0 with State=Connected" "WARNING"
-        }
-    } else {
-        if ($DebugDSC) { Write-Log "[DEBUG] DSC nonprod not found, skipping" "INFO" }
     }
 
     $result = @{
@@ -456,7 +416,6 @@ function Main {
     Write-Log "Log file: $LogFile"
     Write-Log "MaxConcurrent: $MaxConcurrentMigrations (sliding window), InterMigrationDelay: ${InterMigrationDelaySeconds}s"
     Write-Log "Cluster order: $($vsphereClusters -join ', ')"
-    if ($DebugDSC) { Write-Log "DebugDSC enabled - verbose DSC/datastore logging" "INFO" }
     if ($DryRun) {
         Write-Log "[DRY RUN] Analyze only, no migration" "WARNING"
     }
@@ -481,7 +440,7 @@ function Main {
         # 2. Pre-fetch cluster Host and Datastore Cluster resources
         $clusterResources = @{}
         foreach ($clusterName in $vsphereClusters) {
-            $res = Get-ClusterResources -ClusterName $clusterName -DebugDSC:$DebugDSC
+            $res = Get-ClusterResources -ClusterName $clusterName
             $clusterResources[$clusterName] = $res
             if ($res) {
                 Write-Log "Cluster $clusterName: $($res.Hosts.Count) Hosts, DSC-prod: $($res.DatastoresProd.Count) DS, DSC-nonprod: $($res.DatastoresNonprod.Count) DS" "INFO"
