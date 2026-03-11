@@ -1,16 +1,16 @@
 # PowerShell Script: VM Cluster Rebalance
-# Function: 连接 vCenter，根据 buildid 算法将 VM 在 core-01/core-02/core-03 集群间重新均衡
-# 新顺序: [core-02, core-03, core-01] - core-03 为高性能集群
+# Function: Connect to vCenter, rebalance VMs across core-01/core-02/core-03 clusters by buildid algorithm
+# Cluster order: [core-02, core-03, core-01] - core-03 is high-performance cluster
 #
-# 算法: buildid = VM名称中的数字, index = buildid % 3, cluster = vsphere_cluster[index]
-#       ESXi/Datastore 同样用 buildid % count 均匀分配
+# Algorithm: buildid = digits from VM name, index = buildid % 3, cluster = vsphere_cluster[index]
+#            ESXi/Datastore distributed by buildid % count
 #
-# 用法:
-#   .\vm_cluster_rebalance.ps1                    # 默认执行
-#   .\vm_cluster_rebalance.ps1 -DryRun            # 仅分析不迁移
-#   .\vm_cluster_rebalance.ps1 -BatchSize 3       # 每批3台
-#   .\vm_cluster_rebalance.ps1 -SkipVerification  # 跳过端口验证
-#   .\vm_cluster_rebalance.ps1 -NoPrompt           # 自动化运行不等待按键
+# Usage:
+#   .\vm_cluster_rebalance.ps1                    # Default run
+#   .\vm_cluster_rebalance.ps1 -DryRun            # Analyze only, no migration
+#   .\vm_cluster_rebalance.ps1 -BatchSize 3       # 3 VMs per batch
+#   .\vm_cluster_rebalance.ps1 -SkipVerification  # Skip port verification
+#   .\vm_cluster_rebalance.ps1 -NoPrompt          # Auto run, no key prompt
 
 param(
     [Parameter(Mandatory=$false)]
@@ -29,46 +29,46 @@ param(
     [switch]$NoPrompt = $false
 )
 
-# ============ 配置区域 - 请根据实际环境修改 ============
-# vCenter 连接配置
+# ============ Configuration - Edit for your environment ============
+# vCenter connection
 $vCenterConfig = @{
     Server   = "vcenter.company.com"
     User     = "administrator@vsphere.local"
     Password = "your_password"
 }
 
-# 集群顺序: [core-02, core-03, core-01] - 按优先级排列，core-03 为高性能
+# Cluster order: [core-02, core-03, core-01] - core-03 is high-performance
 $vsphereClusters = @("core-02", "core-03", "core-01")
 
-# 跳板机配置 - 用于验证 VM 连通性 (仅验证 vm_name 含 linux 的 VM，通过 SSH 22 端口)
-# 若 VM 可从本机直接访问，可留空 Host
+# Jump host config - for VM connectivity verification (Linux VMs only via SSH port 22)
+# Leave Host empty if VMs are reachable from local machine
 $JumpHostConfig = @{
-    Host     = "jump.company.com"   # 跳板机地址，留空 "" 则用本地验证
-    User     = "admin"              # SSH 用户名 (跳板机)
-    Password = ""                   # 跳板机密码，留空则使用 SSH 密钥 (ssh-copy-id)
-    Port     = 22                   # SSH 端口
+    Host     = "jump.company.com"   # Jump host address, empty "" for local verification
+    User     = "admin"              # SSH username (jump host)
+    Password = ""                   # Jump host password, empty for SSH key (ssh-copy-id)
+    Port     = 22                   # SSH port
 }
 
-# 仅验证 vm_name 含 "linux" 的 VM，使用 SSH 22 端口
+# Only verify VMs with "linux" in name, using SSH port 22
 $VMVerificationPorts = @(22)
 
-# ============ 脚本逻辑 ============
-# 集群资源缓存，避免重复查询
+# ============ Script logic ============
+# Cluster resources cache
 $script:ClusterResourcesCache = @{}
 
-# 导入 VMware PowerCLI 模块
+# Import VMware PowerCLI module
 try {
     Import-Module VMware.PowerCLI -ErrorAction Stop
-    Write-Host "VMware PowerCLI 模块已成功导入" -ForegroundColor Green
+    Write-Host "VMware PowerCLI module loaded successfully" -ForegroundColor Green
 } catch {
-    Write-Error "无法导入 VMware PowerCLI 模块，请确保已安装 VMware PowerCLI。"
+    Write-Error "Cannot import VMware PowerCLI module. Please ensure VMware PowerCLI is installed."
     exit 1
 }
 
 Set-PowerCLIConfiguration -InvalidCertificateAction Ignore -Confirm:$false
 Set-PowerCLIConfiguration -DefaultVIServerMode Single -Confirm:$false
 
-# 日志函数
+# Log function
 function Write-Log {
     param(
         [string]$Message,
@@ -87,7 +87,7 @@ function Write-Log {
     Add-Content -Path $LogFile -Value $logMessage -ErrorAction SilentlyContinue
 }
 
-# 从 VM 名称提取 buildid (数字)
+# Extract buildid (digits) from VM name
 function Get-BuildIdFromVMName {
     param([string]$VMName)
     if ($VMName -match '(\d+)') {
@@ -96,7 +96,7 @@ function Get-BuildIdFromVMName {
     return 0
 }
 
-# 根据 buildid 计算目标集群
+# Calculate target cluster by buildid
 function Get-TargetCluster {
     param(
         [int]$BuildId,
@@ -108,7 +108,7 @@ function Get-TargetCluster {
     return $Clusters[$index]
 }
 
-# 根据 buildid 从列表中选取目标 (ESXi 或 Datastore)
+# Select target from list by buildid (ESXi or Datastore)
 function Get-TargetByBuildId {
     param(
         [int]$BuildId,
@@ -120,23 +120,23 @@ function Get-TargetByBuildId {
     return $Items[$index]
 }
 
-# 连接 vCenter
+# Connect to vCenter
 function Connect-ToVCenter {
     param([hashtable]$Config)
     try {
-        Write-Log "正在连接 vCenter: $($Config.Server)..."
+        Write-Log "Connecting to vCenter: $($Config.Server)..."
         $securePassword = ConvertTo-SecureString $Config.Password -AsPlainText -Force
         $credential = New-Object System.Management.Automation.PSCredential($Config.User, $securePassword)
         $connection = Connect-VIServer -Server $Config.Server -Credential $credential -ErrorAction Stop
-        Write-Log "成功连接 vCenter" "SUCCESS"
+        Write-Log "Connected to vCenter successfully" "SUCCESS"
         return $connection
     } catch {
-        Write-Log "连接 vCenter 失败: $($_.Exception.Message)" "ERROR"
+        Write-Log "Failed to connect to vCenter: $($_.Exception.Message)" "ERROR"
         return $null
     }
 }
 
-# 读取三个集群上的所有 VM
+# Get all VMs from the three clusters
 function Get-AllVMsFromClusters {
     param(
         [string[]]$ClusterNames
@@ -145,18 +145,18 @@ function Get-AllVMsFromClusters {
     foreach ($clusterName in $ClusterNames) {
         $cluster = Get-Cluster -Name $clusterName -ErrorAction SilentlyContinue
         if (-not $cluster) {
-            Write-Log "集群不存在: $clusterName" "WARNING"
+            Write-Log "Cluster not found: $clusterName" "WARNING"
             continue
         }
         $vms = Get-VM -Location $cluster -ErrorAction SilentlyContinue
         foreach ($vm in $vms) {
-            # 排除包含关键字或模板的 VM
+            # Exclude VMs containing keywords or templates
             $vmNameLower = $vm.Name.ToLower()
             $excluded = $false
             foreach ($kw in $ExclusionKeywords) {
                 if ($vmNameLower -like "*$($kw.ToLower())*") {
                     $excluded = $true
-                    Write-Log "排除 VM: $($vm.Name) (包含关键字: $kw)" "INFO"
+                    Write-Log "Excluding VM: $($vm.Name) (contains keyword: $kw)" "INFO"
                     break
                 }
             }
@@ -168,7 +168,7 @@ function Get-AllVMsFromClusters {
     return $allVMs
 }
 
-# 获取 VM 当前所在集群
+# Get VM's current cluster
 function Get-VMCurrentCluster {
     param([object]$VM)
     $vmHost = $VM | Get-VMHost -ErrorAction SilentlyContinue
@@ -177,8 +177,32 @@ function Get-VMCurrentCluster {
     return $cluster.Name
 }
 
-# 获取目标集群的 ESXi 主机和 Datastore 列表
-# 每个 cluster 对应一个 datacenter，包含多个 ESXi 和多个 datastore
+# Get VM environment (prod/uat vs dev/qa) - determined by folder path
+# folder contains qa/dev -> nonprod (DSC-xxx-nonprod), contains prod/uat -> prod (DSC-xxx)
+function Get-VMEnvironmentFromFolder {
+    param([object]$VM)
+    $folderPath = ""
+    try {
+        $f = $VM.Folder
+        while ($f -and $f.Name) {
+            $folderPath = $f.Name + "/" + $folderPath
+            $f = $f.Parent
+        }
+        $folderPath = $folderPath.TrimEnd("/").ToLower()
+    } catch {
+        return "prod"  # default prod
+    }
+    if ($folderPath -match "qa|dev") {
+        return "nonprod"
+    }
+    if ($folderPath -match "prod|uat") {
+        return "prod"
+    }
+    return "prod"  # default prod
+}
+
+# Get target cluster's ESXi hosts and Datastore list
+# Each cluster: DSC-{cluster} (prod/uat), DSC-{cluster}-nonprod (dev/qa)
 function Get-ClusterResources {
     param([string]$ClusterName)
     if ($script:ClusterResourcesCache.ContainsKey($ClusterName)) {
@@ -186,27 +210,33 @@ function Get-ClusterResources {
     }
     $cluster = Get-Cluster -Name $ClusterName -ErrorAction SilentlyContinue
     if (-not $cluster) {
-        Write-Log "集群不存在: $ClusterName" "ERROR"
+        Write-Log "Cluster not found: $ClusterName" "ERROR"
         return $null
     }
     $hosts = @(Get-VMHost -Location $cluster -ErrorAction SilentlyContinue | Where-Object { $_.ConnectionState -eq "Connected" } | Sort-Object Name)
-    # 获取该 cluster 下所有主机可见的 datastore
-    $datastores = @(Get-Datastore -VMHost $hosts[0] -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Connected" })
-    if ($datastores.Count -eq 0 -and $hosts.Count -gt 1) {
-        $datastores = @(Get-Datastore -VMHost $hosts[1] -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Connected" })
+    # Datastore Cluster: DSC-core-01 (prod/uat), DSC-core-01-nonprod (dev/qa)
+    $dscProd = Get-DatastoreCluster -Name "DSC-$ClusterName" -ErrorAction SilentlyContinue
+    $dscNonprod = Get-DatastoreCluster -Name "DSC-$ClusterName-Nonprod" -ErrorAction SilentlyContinue
+    $datastoresProd = @()
+    $datastoresNonprod = @()
+    if ($dscProd) {
+        $datastoresProd = @($dscProd | Get-Datastore -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
     }
-    $datastores = $datastores | Sort-Object Name -Unique
+    if ($dscNonprod) {
+        $datastoresNonprod = @($dscNonprod | Get-Datastore -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Connected" } | Sort-Object Name)
+    }
     $result = @{
-        Cluster    = $cluster
-        Hosts      = $hosts
-        Datastores = @($datastores)
+        Cluster          = $cluster
+        Hosts            = $hosts
+        DatastoresProd   = $datastoresProd
+        DatastoresNonprod = $datastoresNonprod
     }
     $script:ClusterResourcesCache[$ClusterName] = $result
     return $result
 }
 
-# 通过跳板机检查 VM 端口是否可达 (使用 vm_name 作为目标，跳板机需能解析)
-# 支持密码登录: 配置 JumpHostConfig.Password 后使用 sshpass 或 plink
+# Check VM port reachability via jump host (uses vm_name as target, jump host must resolve it)
+# Supports password login: use sshpass or plink when JumpHostConfig.Password is set
 function Test-VMPortViaJumpHost {
     param(
         [string]$JumpHost,
@@ -225,7 +255,7 @@ function Test-VMPortViaJumpHost {
 
     try {
         if ($JumpPassword) {
-            # 密码登录: 优先 sshpass (Linux/Git Bash), 备选 plink (Windows PuTTY)
+            # Password login: prefer sshpass (Linux/Git Bash), fallback plink (Windows PuTTY)
             $sshpass = Get-Command sshpass -ErrorAction SilentlyContinue
             $plink = Get-Command plink -ErrorAction SilentlyContinue
             if ($sshpass) {
@@ -237,15 +267,15 @@ function Test-VMPortViaJumpHost {
                 $result = & plink -batch -pw $JumpPassword $target $remoteCmd 2>$null
                 if ($LASTEXITCODE -eq 0) { return $true }
             } else {
-                Write-Log "跳板机已配置密码但未找到 sshpass 或 plink，请安装后重试或配置 SSH 密钥" "WARNING"
+                Write-Log "Jump host password configured but sshpass or plink not found. Install one or use SSH key" "WARNING"
                 return $false
             }
         } else {
-            # 密钥登录
+            # Key-based login
             $result = & ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no $target $remoteCmd 2>$null
             if ($LASTEXITCODE -eq 0) { return $true }
         }
-        # 备选: bash /dev/tcp
+        # Fallback: bash /dev/tcp
         $cmdBash = "timeout $timeout bash -c 'echo >/dev/tcp/$VMName/$VMPort' 2>/dev/null; exit `$?"
         if ($JumpPassword -and (Get-Command sshpass -ErrorAction SilentlyContinue)) {
             $env:SSHPASS = $JumpPassword
@@ -260,40 +290,40 @@ function Test-VMPortViaJumpHost {
     }
 }
 
-# 验证 VM 是否可用 (使用 vm_name 直接检查端口，跳板机/本机需能解析 vm_name)
+# Verify VM reachability (uses vm_name directly, jump host/local must resolve vm_name)
 function Test-VMReachable {
     param(
         [string]$VMName,
         [hashtable]$JumpConfig,
         [int]$TimeoutSeconds = 60
     )
-    # 若配置了跳板机，通过跳板机验证
+    # If jump host configured, verify via jump host
     if ($JumpConfig.Host) {
         $jumpPwd = if ($JumpConfig.Password) { $JumpConfig.Password } else { "" }
         foreach ($port in $VMVerificationPorts) {
             $ok = Test-VMPortViaJumpHost -JumpHost $JumpConfig.Host -JumpUser $JumpConfig.User -JumpPassword $jumpPwd -VMName $VMName -VMPort $port -TimeoutSeconds 10
             if ($ok) {
-                Write-Log "VM $VMName 端口 $port 可达" "SUCCESS"
+                Write-Log "VM $VMName port $port reachable" "SUCCESS"
                 return $true
             }
         }
     } else {
-        # 未配置跳板机，尝试本地 Test-NetConnection
+        # No jump host, try local Test-NetConnection
         foreach ($port in $VMVerificationPorts) {
             try {
                 $result = Test-NetConnection -ComputerName $VMName -Port $port -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
                 if ($result.TcpTestSucceeded) {
-                    Write-Log "VM $VMName 端口 $port 可达" "SUCCESS"
+                    Write-Log "VM $VMName port $port reachable" "SUCCESS"
                     return $true
                 }
             } catch { }
         }
     }
-    Write-Log "VM $VMName 端口 $($VMVerificationPorts -join '/') 均不可达" "WARNING"
+    Write-Log "VM $VMName ports $($VMVerificationPorts -join '/') not reachable" "WARNING"
     return $false
 }
 
-# 执行单台 VM 迁移
+# Migrate single VM
 function Move-VMToTarget {
     param(
         [object]$VM,
@@ -302,99 +332,111 @@ function Move-VMToTarget {
         [string]$TargetClusterName
     )
     try {
-        Write-Log "迁移 VM: $($VM.Name) -> Cluster: $TargetClusterName, Host: $($DestinationHost.Name), Datastore: $($DestinationDatastore.Name)"
+        Write-Log "Migrating VM: $($VM.Name) -> Cluster: $TargetClusterName, Host: $($DestinationHost.Name), Datastore: $($DestinationDatastore.Name)"
         Move-VM -VM $VM -Destination $DestinationHost -Datastore $DestinationDatastore -Confirm:$false -ErrorAction Stop
-        Write-Log "VM $($VM.Name) 迁移命令已执行" "SUCCESS"
+        Write-Log "VM $($VM.Name) migration command executed" "SUCCESS"
         return $true
     } catch {
-        Write-Log "迁移 VM $($VM.Name) 失败: $($_.Exception.Message)" "ERROR"
+        Write-Log "VM $($VM.Name) migration failed: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
 
-# 主逻辑
+# Main logic
 function Main {
-    Write-Log "========== VM Cluster Rebalance 开始 =========="
-    Write-Log "日志文件: $LogFile"
-    Write-Log "批次大小: $BatchSize"
-    Write-Log "集群顺序: $($vsphereClusters -join ', ')"
+    Write-Log "========== VM Cluster Rebalance Started =========="
+    Write-Log "Log file: $LogFile"
+    Write-Log "Batch size: $BatchSize"
+    Write-Log "Cluster order: $($vsphereClusters -join ', ')"
     if ($DryRun) {
-        Write-Log "【DRY RUN 模式】仅分析，不执行迁移" "WARNING"
+        Write-Log "[DRY RUN] Analyze only, no migration" "WARNING"
     }
 
     $connection = Connect-ToVCenter -Config $vCenterConfig
     if (-not $connection) {
-        Write-Log "无法连接 vCenter，退出" "ERROR"
+        Write-Log "Cannot connect to vCenter, exiting" "ERROR"
         return
     }
 
     try {
-        # 1. 读取三个集群上的所有 VM
-        Write-Log "正在读取集群 $($vsphereClusters -join ', ') 上的所有 VM..."
+        # 1. Get all VMs from the three clusters
+        Write-Log "Reading VMs from clusters $($vsphereClusters -join ', ')..."
         $allVMs = Get-AllVMsFromClusters -ClusterNames $vsphereClusters
-        Write-Log "共找到 $($allVMs.Count) 台 VM"
+        Write-Log "Found $($allVMs.Count) VMs"
 
         if ($allVMs.Count -eq 0) {
-            Write-Log "没有需要处理的 VM" "WARNING"
+            Write-Log "No VMs to process" "WARNING"
             return
         }
 
-        # 2. 预读取各集群的 Host 和 Datastore，避免 foreach 内重复查询
+        # 2. Pre-fetch cluster Host and Datastore Cluster resources
         $clusterResources = @{}
         foreach ($clusterName in $vsphereClusters) {
             $res = Get-ClusterResources -ClusterName $clusterName
             $clusterResources[$clusterName] = $res
             if ($res) {
-                Write-Log "集群 $clusterName: $($res.Hosts.Count) 台 Host, $($res.Datastores.Count) 个 Datastore" "INFO"
+                Write-Log "Cluster $clusterName: $($res.Hosts.Count) Hosts, DSC-prod: $($res.DatastoresProd.Count) DS, DSC-nonprod: $($res.DatastoresNonprod.Count) DS" "INFO"
             } else {
-                Write-Log "集群 $clusterName 资源获取失败" "WARNING"
+                Write-Log "Cluster $clusterName resource fetch failed" "WARNING"
             }
         }
 
-        # 3. 分析每台 VM 是否需要迁移及目标
+        # 3. Analyze each VM for migration target
         $migrationPlan = @()
         foreach ($vm in $allVMs) {
             $buildId = Get-BuildIdFromVMName -VMName $vm.Name
             $targetCluster = Get-TargetCluster -BuildId $buildId -Clusters $vsphereClusters
             $currentCluster = Get-VMCurrentCluster -VM $vm
+            $vmEnvironment = Get-VMEnvironmentFromFolder -VM $vm
 
             if (-not $targetCluster) {
-                Write-Log "VM $($vm.Name) buildid=$buildId 无法计算目标集群，跳过" "WARNING"
+                Write-Log "VM $($vm.Name) buildid=$buildId cannot determine target cluster, skipping" "WARNING"
                 continue
             }
 
             if ($currentCluster -eq $targetCluster) {
-                Write-Log "VM $($vm.Name) 已在目标集群 $targetCluster，无需迁移" "INFO"
+                Write-Log "VM $($vm.Name) already in target cluster $targetCluster, no migration needed" "INFO"
                 continue
             }
 
             $resources = $clusterResources[$targetCluster]
-            if (-not $resources -or $resources.Hosts.Count -eq 0 -or $resources.Datastores.Count -eq 0) {
-                Write-Log "目标集群 $targetCluster 无可用 Host 或 Datastore，跳过 VM $($vm.Name)" "ERROR"
+            if (-not $resources -or $resources.Hosts.Count -eq 0) {
+                Write-Log "Target cluster $targetCluster has no available Host, skipping VM $($vm.Name)" "ERROR"
+                continue
+            }
+
+            $targetDatastores = if ($vmEnvironment -eq "nonprod") { $resources.DatastoresNonprod } else { $resources.DatastoresProd }
+            if (-not $targetDatastores -or $targetDatastores.Count -eq 0) {
+                $dscName = if ($vmEnvironment -eq "nonprod") { "DSC-$targetCluster-Nonprod" } else { "DSC-$targetCluster" }
+                Write-Log "Target $dscName has no available Datastore, skipping VM $($vm.Name) (env=$vmEnvironment)" "ERROR"
                 continue
             }
 
             $targetHost = Get-TargetByBuildId -BuildId $buildId -Items $resources.Hosts
-            $targetDs = Get-TargetByBuildId -BuildId $buildId -Items $resources.Datastores
+            $targetDs = Get-TargetByBuildId -BuildId $buildId -Items $targetDatastores
 
             $migrationPlan += [PSCustomObject]@{
                 VM              = $vm
                 BuildId         = $buildId
+                VMEnvironment   = $vmEnvironment
                 CurrentCluster  = $currentCluster
                 TargetCluster   = $targetCluster
-                TargetHost     = $targetHost
+                TargetHost      = $targetHost
                 TargetDatastore = $targetDs
             }
         }
 
-        Write-Log "需要迁移的 VM 数量: $($migrationPlan.Count)"
+        Write-Log "VMs to migrate: $($migrationPlan.Count)"
+        foreach ($item in $migrationPlan) {
+            Write-Log "  [env=$($item.VMEnvironment)] $($item.VM.Name): $($item.CurrentCluster) -> $($item.TargetCluster) (DS: $($item.TargetDatastore.Name))" "INFO"
+        }
 
         if ($migrationPlan.Count -eq 0) {
-            Write-Log "所有 VM 已在正确集群，无需迁移" "SUCCESS"
+            Write-Log "All VMs already in correct clusters, no migration needed" "SUCCESS"
             return
         }
 
-        # 4. 按批次执行迁移
+        # 4. Execute migration in batches
         $totalBatches = [Math]::Ceiling($migrationPlan.Count / $BatchSize)
         $batchIndex = 0
         $successCount = 0
@@ -403,16 +445,16 @@ function Main {
         for ($i = 0; $i -lt $migrationPlan.Count; $i += $BatchSize) {
             $batchIndex++
             $batch = $migrationPlan[$i..([Math]::Min($i + $BatchSize - 1, $migrationPlan.Count - 1))]
-            Write-Log "---------- 批次 $batchIndex / $totalBatches (共 $($batch.Count) 台) ----------"
+            Write-Log "---------- Batch $batchIndex / $totalBatches ($($batch.Count) VMs) ----------"
 
             if ($DryRun) {
                 foreach ($item in $batch) {
-                    Write-Log "[DRY RUN] $($item.VM.Name): $($item.CurrentCluster) -> $($item.TargetCluster) (Host: $($item.TargetHost.Name), DS: $($item.TargetDatastore.Name))" "INFO"
+                    Write-Log "[DRY RUN] $($item.VM.Name) [env=$($item.VMEnvironment)]: $($item.CurrentCluster) -> $($item.TargetCluster) (Host: $($item.TargetHost.Name), DS: $($item.TargetDatastore.Name))" "INFO"
                 }
                 continue
             }
 
-            # 执行本批次迁移
+            # Execute batch migration
             $batchSuccess = @()
             foreach ($item in $batch) {
                 $ok = Move-VMToTarget -VM $item.VM -DestinationHost $item.TargetHost -DestinationDatastore $item.TargetDatastore -TargetClusterName $item.TargetCluster
@@ -423,13 +465,13 @@ function Main {
                 }
             }
 
-            # 仅对 vm_name 含 "linux" 的 VM 做 SSH 验证（通过跳板机），其他 VM 不验证
+            # Only verify Linux VMs via jump host SSH, skip other VMs
             if ($batchSuccess.Count -gt 0 -and -not $SkipVerification -and $JumpHostConfig.Host) {
                 $linuxBatch = @($batchSuccess | Where-Object { $_.VM.Name -match "linux" })
                 $nonLinuxBatch = @($batchSuccess | Where-Object { $_.VM.Name -notmatch "linux" })
                 if ($linuxBatch.Count -gt 0) {
                     $waitSec = [Math]::Min($VerificationTimeoutSeconds, 30)
-                    Write-Log "等待 $waitSec 秒后验证 $($linuxBatch.Count) 台 Linux VM 连通性 (SSH 22)..."
+                    Write-Log "Waiting $waitSec seconds before verifying $($linuxBatch.Count) Linux VM(s) connectivity (SSH 22)..."
                     Start-Sleep -Seconds $waitSec
 
                     foreach ($item in $linuxBatch) {
@@ -437,39 +479,39 @@ function Main {
                         $verified = Test-VMReachable -VMName $vmName -JumpConfig $JumpHostConfig -TimeoutSeconds 30
                         if ($verified) {
                             $successCount++
-                            Write-Log "VM $vmName 迁移并验证成功 (SSH 22 可达)" "SUCCESS"
+                            Write-Log "VM $vmName migrated and verified (SSH 22 reachable)" "SUCCESS"
                         } else {
-                            Write-Log "ALERT: VM $vmName 迁移后 SSH 22 端口不可达，请人工确认!" "ALERT"
+                            Write-Log "ALERT: VM $vmName SSH port 22 not reachable after migration, manual check required!" "ALERT"
                             $successCount++
                         }
                     }
                 }
                 if ($nonLinuxBatch.Count -gt 0) {
                     $successCount += $nonLinuxBatch.Count
-                    Write-Log "$($nonLinuxBatch.Count) 台非 Linux VM 已迁移，跳过验证" "INFO"
+                    Write-Log "$($nonLinuxBatch.Count) non-Linux VM(s) migrated, verification skipped" "INFO"
                 }
             } elseif ($batchSuccess.Count -gt 0) {
                 $successCount += $batchSuccess.Count
-                Write-Log "已跳过验证，假定 $($batchSuccess.Count) 台迁移成功" "INFO"
+                Write-Log "Verification skipped, assuming $($batchSuccess.Count) migration(s) successful" "INFO"
             }
 
-            # 批次间短暂间隔，避免 vCenter 压力过大
+            # Brief pause between batches to reduce vCenter load
             if ($i + $BatchSize -lt $migrationPlan.Count) {
-                Write-Log "等待 10 秒后处理下一批次..."
+                Write-Log "Waiting 10 seconds before next batch..."
                 Start-Sleep -Seconds 10
             }
         }
 
-        # 汇总
+        # Summary
         Write-Log ""
-        Write-Log "========== 执行完成 ==========" "INFO"
-        Write-Log "成功: $successCount, 失败: $failCount"
+        Write-Log "========== Execution Complete ==========" "INFO"
+        Write-Log "Success: $successCount, Failed: $failCount"
     } finally {
         try {
             Disconnect-VIServer -Server $connection -Confirm:$false -ErrorAction SilentlyContinue
-            Write-Log "已断开 vCenter 连接"
+            Write-Log "Disconnected from vCenter"
         } catch {
-            Write-Log "断开连接时出错: $($_.Exception.Message)" "WARNING"
+            Write-Log "Error during disconnect: $($_.Exception.Message)" "WARNING"
         }
     }
 }
@@ -477,6 +519,6 @@ function Main {
 Main
 
 if (-not $NoPrompt) {
-    Write-Host "脚本执行完毕。按任意键退出..."
+    Write-Host "Script completed. Press any key to exit..."
     $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 }
