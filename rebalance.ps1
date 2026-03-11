@@ -359,17 +359,24 @@ function Move-VMToTarget {
         [switch]$RunAsync = $false
     )
     try {
-        Write-Log "Migrating VM: $($VM.Name) -> Cluster: $TargetClusterName, Host: $($DestinationHost.Name), Datastore: $($DestinationDatastore.Name)"
+        $vmName = if ($VM) { $VM.Name } else { "null" }
+        $hostName = if ($DestinationHost) { $DestinationHost.Name } else { "null" }
+        $dsName = if ($DestinationDatastore) { $DestinationDatastore.Name } else { "null" }
+        if (-not $VM -or -not $DestinationHost -or -not $DestinationDatastore) {
+            Write-Log "Move-VMToTarget: invalid params (VM=$vmName, Host=$hostName, DS=$dsName)" "ERROR"
+            return @{ Success = $false; Task = $null; VM = $VM }
+        }
+        Write-Log "Migrating VM: $vmName -> Cluster: $TargetClusterName, Host: $hostName, Datastore: $dsName"
         if ($RunAsync) {
             $task = Move-VM -VM $VM -Destination $DestinationHost -Datastore $DestinationDatastore -Confirm:$false -RunAsync -ErrorAction Stop
             return @{ Success = $true; Task = $task; VM = $VM }
         } else {
             Move-VM -VM $VM -Destination $DestinationHost -Datastore $DestinationDatastore -Confirm:$false -ErrorAction Stop
-            Write-Log "VM $($VM.Name) migration completed (task finished)" "SUCCESS"
+            Write-Log "VM $vmName migration completed (task finished)" "SUCCESS"
             return @{ Success = $true; Task = $null; VM = $VM }
         }
     } catch {
-        Write-Log "VM $($VM.Name) migration failed: $($_.Exception.Message)" "ERROR"
+        Write-Log "VM $vmName migration failed: $($_.Exception.Message)" "ERROR"
         return @{ Success = $false; Task = $null; VM = $VM }
     }
 }
@@ -514,8 +521,6 @@ function Main {
                 Write-Log "[DRY RUN] $($item.VM.Name) [env=$($item.VMEnvironment)]: $($item.CurrentCluster) -> $($item.TargetCluster) (Host: $($item.TargetHost.Name), DS: $($item.TargetDatastore.Name))" "INFO"
             }
         } else {
-            $queue = [System.Collections.ArrayList]@()
-            foreach ($item in $migrationPlan) { [void]$queue.Add($item) }
             $running = @()  # array of @{ Task; Item }
             $pollInterval = 10
 
@@ -548,8 +553,10 @@ function Main {
                 Write-Log "Sliding window: up to $MaxConcurrentMigrations concurrent, start new when any completes" "INFO"
                 $totalToMigrate = $migrationPlan.Count
                 $completed = 0
+                $queue = @($migrationPlan)  # Fixed array - use index to avoid ArrayList issues
+                $queueIndex = 0
 
-                while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+                while ($queueIndex -lt $queue.Count -or $running.Count -gt 0) {
                     # Check completed tasks
                     $stillRunning = @()
                     foreach ($r in $running) {
@@ -569,21 +576,25 @@ function Main {
                                 else { Write-Log "ALERT: VM $($r.Item.VM.Name) SSH port 22 not reachable after migration!" "ALERT" }
                             }
                             # Start next from queue
-                            if ($queue.Count -gt 0) {
+                            if ($queueIndex -lt $queue.Count) {
                                 if ($InterMigrationDelaySeconds -gt 0) { Start-Sleep -Seconds $InterMigrationDelaySeconds }
-                                $next = $queue[0]; $queue.RemoveAt(0)
-                                $res = Move-VMToTarget -VM $next.VM -DestinationHost $next.TargetHost -DestinationDatastore $next.TargetDatastore -TargetClusterName $next.TargetCluster -RunAsync
-                                if ($res.Success) { $stillRunning += @{ Task = $res.Task; Item = $next } } else { $failCount++; $completed++ }
+                                $item = $queue[$queueIndex]; $queueIndex++
+                                if ($item.VM -and $item.TargetHost -and $item.TargetDatastore) {
+                                    $res = Move-VMToTarget -VM $item.VM -DestinationHost $item.TargetHost -DestinationDatastore $item.TargetDatastore -TargetClusterName $item.TargetCluster -RunAsync
+                                    if ($res.Success) { $stillRunning += @{ Task = $res.Task; Item = $item } } else { $failCount++; $completed++ }
+                                } else { Write-Log "Skip invalid item at index $($queueIndex-1)" "WARNING"; $failCount++; $completed++ }
                             }
                         } elseif ($state -eq 'Error') {
                             $failCount++
                             $completed++
                             Write-Log "VM $($r.Item.VM.Name) migration failed" "ERROR"
-                            if ($queue.Count -gt 0) {
+                            if ($queueIndex -lt $queue.Count) {
                                 if ($InterMigrationDelaySeconds -gt 0) { Start-Sleep -Seconds $InterMigrationDelaySeconds }
-                                $next = $queue[0]; $queue.RemoveAt(0)
-                                $res = Move-VMToTarget -VM $next.VM -DestinationHost $next.TargetHost -DestinationDatastore $next.TargetDatastore -TargetClusterName $next.TargetCluster -RunAsync
-                                if ($res.Success) { $stillRunning += @{ Task = $res.Task; Item = $next } } else { $failCount++; $completed++ }
+                                $item = $queue[$queueIndex]; $queueIndex++
+                                if ($item.VM -and $item.TargetHost -and $item.TargetDatastore) {
+                                    $res = Move-VMToTarget -VM $item.VM -DestinationHost $item.TargetHost -DestinationDatastore $item.TargetDatastore -TargetClusterName $item.TargetCluster -RunAsync
+                                    if ($res.Success) { $stillRunning += @{ Task = $res.Task; Item = $item } } else { $failCount++; $completed++ }
+                                } else { Write-Log "Skip invalid item at index $($queueIndex-1)" "WARNING"; $failCount++; $completed++ }
                             }
                         } else {
                             $stillRunning += $r
@@ -592,11 +603,13 @@ function Main {
                     $running = $stillRunning
 
                     # Fill pool up to MaxConcurrentMigrations
-                    while ($running.Count -lt $MaxConcurrentMigrations -and $queue.Count -gt 0) {
+                    while ($running.Count -lt $MaxConcurrentMigrations -and $queueIndex -lt $queue.Count) {
                         if ($InterMigrationDelaySeconds -gt 0 -and $running.Count -gt 0) { Start-Sleep -Seconds $InterMigrationDelaySeconds }
-                        $next = $queue[0]; $queue.RemoveAt(0)
-                        $res = Move-VMToTarget -VM $next.VM -DestinationHost $next.TargetHost -DestinationDatastore $next.TargetDatastore -TargetClusterName $next.TargetCluster -RunAsync
-                        if ($res.Success) { $running += @{ Task = $res.Task; Item = $next } } else { $failCount++; $completed++ }
+                        $item = $queue[$queueIndex]; $queueIndex++
+                        if ($item.VM -and $item.TargetHost -and $item.TargetDatastore) {
+                            $res = Move-VMToTarget -VM $item.VM -DestinationHost $item.TargetHost -DestinationDatastore $item.TargetDatastore -TargetClusterName $item.TargetCluster -RunAsync
+                            if ($res.Success) { $running += @{ Task = $res.Task; Item = $item } } else { $failCount++; $completed++ }
+                        } else { Write-Log "Skip invalid item at index $($queueIndex-1)" "WARNING"; $failCount++; $completed++ }
                     }
 
                     if ($running.Count -gt 0) {
