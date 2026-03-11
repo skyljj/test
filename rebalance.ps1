@@ -339,7 +339,19 @@ function Main {
             return
         }
 
-        # 2. 分析每台 VM 是否需要迁移及目标
+        # 2. 预读取各集群的 Host 和 Datastore，避免 foreach 内重复查询
+        $clusterResources = @{}
+        foreach ($clusterName in $vsphereClusters) {
+            $res = Get-ClusterResources -ClusterName $clusterName
+            $clusterResources[$clusterName] = $res
+            if ($res) {
+                Write-Log "集群 $clusterName: $($res.Hosts.Count) 台 Host, $($res.Datastores.Count) 个 Datastore" "INFO"
+            } else {
+                Write-Log "集群 $clusterName 资源获取失败" "WARNING"
+            }
+        }
+
+        # 3. 分析每台 VM 是否需要迁移及目标
         $migrationPlan = @()
         foreach ($vm in $allVMs) {
             $buildId = Get-BuildIdFromVMName -VMName $vm.Name
@@ -356,7 +368,7 @@ function Main {
                 continue
             }
 
-            $resources = Get-ClusterResources -ClusterName $targetCluster
+            $resources = $clusterResources[$targetCluster]
             if (-not $resources -or $resources.Hosts.Count -eq 0 -or $resources.Datastores.Count -eq 0) {
                 Write-Log "目标集群 $targetCluster 无可用 Host 或 Datastore，跳过 VM $($vm.Name)" "ERROR"
                 continue
@@ -382,7 +394,7 @@ function Main {
             return
         }
 
-        # 3. 按批次执行迁移
+        # 4. 按批次执行迁移
         $totalBatches = [Math]::Ceiling($migrationPlan.Count / $BatchSize)
         $batchIndex = 0
         $successCount = 0
