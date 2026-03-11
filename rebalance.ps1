@@ -11,12 +11,21 @@
 #   .\vm_cluster_rebalance.ps1 -BatchSize 3       # 3 VMs per batch
 #   .\vm_cluster_rebalance.ps1 -SkipVerification  # Skip port verification
 #   .\vm_cluster_rebalance.ps1 -NoPrompt          # Auto run, no key prompt
+#   .\vm_cluster_rebalance.ps1 -DebugDSC         # Debug DSC/datastore lookup
+#   .\vm_cluster_rebalance.ps1 -MaxConcurrent 5  # Sliding window: 5 concurrent, start new when any completes
+#   .\vm_cluster_rebalance.ps1 -InterMigrationDelay 60  # Wait 60s after each VM for storage to settle
 
 param(
     [Parameter(Mandatory=$false)]
     [string]$LogFile = "vm_cluster_rebalance_log.txt",
     [Parameter(Mandatory=$false)]
     [int]$BatchSize = 5,
+    [Parameter(Mandatory=$false)]
+    [int]$MaxConcurrentMigrations = 5,
+    [Parameter(Mandatory=$false)]
+    [int]$InterMigrationDelaySeconds = 30,
+    [Parameter(Mandatory=$false)]
+    [int]$InterBatchDelaySeconds = 60,
     [Parameter(Mandatory=$false)]
     [switch]$DryRun = $false,
     [Parameter(Mandatory=$false)]
@@ -26,7 +35,9 @@ param(
     [Parameter(Mandatory=$false)]
     [string[]]$ExclusionKeywords = @("vcls", "svm", "hci", "template"),
     [Parameter(Mandatory=$false)]
-    [switch]$NoPrompt = $false
+    [switch]$NoPrompt = $false,
+    [Parameter(Mandatory=$false)]
+    [switch]$DebugDSC = $false
 )
 
 # ============ Configuration - Edit for your environment ============
@@ -39,6 +50,8 @@ $vCenterConfig = @{
 
 # Cluster order: [core-02, core-03, core-01] - core-03 is high-performance
 $vsphereClusters = @("core-02", "core-03", "core-01")
+
+# Migration tuning: MaxConcurrent=5 (up to 5 vMotions at once), InterMigrationDelay=30, InterBatchDelay=60
 
 # Jump host config - for VM connectivity verification (Linux VMs only via SSH port 22)
 # Leave Host empty if VMs are reachable from local machine
@@ -375,31 +388,75 @@ function Test-VMReachable {
     return $false
 }
 
-# Migrate single VM
+# Migrate single VM - waits for vMotion task to complete before returning
+# Use -RunAsync to get Task object for explicit task-based waiting
 function Move-VMToTarget {
     param(
         [object]$VM,
         [object]$DestinationHost,
         [object]$DestinationDatastore,
-        [string]$TargetClusterName
+        [string]$TargetClusterName,
+        [switch]$RunAsync = $false
     )
     try {
         Write-Log "Migrating VM: $($VM.Name) -> Cluster: $TargetClusterName, Host: $($DestinationHost.Name), Datastore: $($DestinationDatastore.Name)"
-        Move-VM -VM $VM -Destination $DestinationHost -Datastore $DestinationDatastore -Confirm:$false -ErrorAction Stop
-        Write-Log "VM $($VM.Name) migration command executed" "SUCCESS"
-        return $true
+        if ($RunAsync) {
+            $task = Move-VM -VM $VM -Destination $DestinationHost -Datastore $DestinationDatastore -Confirm:$false -RunAsync -ErrorAction Stop
+            return @{ Success = $true; Task = $task; VM = $VM }
+        } else {
+            Move-VM -VM $VM -Destination $DestinationHost -Datastore $DestinationDatastore -Confirm:$false -ErrorAction Stop
+            Write-Log "VM $($VM.Name) migration completed (task finished)" "SUCCESS"
+            return @{ Success = $true; Task = $null; VM = $VM }
+        }
     } catch {
         Write-Log "VM $($VM.Name) migration failed: $($_.Exception.Message)" "ERROR"
+        return @{ Success = $false; Task = $null; VM = $VM }
+    }
+}
+
+# Wait for vMotion task(s) to complete - polls until all tasks done or timeout
+# Task State: Success, Running, Queued, Error, Unknown (refresh via Get-Task for current state)
+function Wait-ForMigrationTasks {
+    param(
+        [array]$TaskResults,
+        [int]$TimeoutMinutes = 120
+    )
+    $tasks = $TaskResults | Where-Object { $_.Task -ne $null } | ForEach-Object { $_.Task }
+    if ($tasks.Count -eq 0) { return $true }
+    $timeoutSec = $TimeoutMinutes * 60
+    $elapsed = 0
+    $pollInterval = 15
+    while ($elapsed -lt $timeoutSec) {
+        $running = 0
+        foreach ($t in $tasks) {
+            $refreshed = Get-Task -Id $t.Id -ErrorAction SilentlyContinue
+            if ($refreshed -and ($refreshed.State -eq 'Running' -or $refreshed.State -eq 'Queued')) { $running++ }
+        }
+        if ($running -eq 0) { break }
+        Write-Log "Waiting for $running migration task(s)... (${elapsed}s elapsed)" "INFO"
+        Start-Sleep -Seconds $pollInterval
+        $elapsed += $pollInterval
+    }
+    foreach ($tr in $TaskResults) {
+        if ($tr.Task -and ($tr.Task.State -eq 'error' -or $tr.Task.State -eq 'Error')) {
+            Write-Log "VM $($tr.VM.Name) migration task failed" "ERROR"
+            return $false
+        }
+    }
+    if ($elapsed -ge $timeoutSec) {
+        Write-Log "Migration task(s) timeout after $TimeoutMinutes minutes" "ERROR"
         return $false
     }
+    return $true
 }
 
 # Main logic
 function Main {
     Write-Log "========== VM Cluster Rebalance Started =========="
     Write-Log "Log file: $LogFile"
-    Write-Log "Batch size: $BatchSize"
+    Write-Log "MaxConcurrent: $MaxConcurrentMigrations (sliding window), InterMigrationDelay: ${InterMigrationDelaySeconds}s"
     Write-Log "Cluster order: $($vsphereClusters -join ', ')"
+    if ($DebugDSC) { Write-Log "DebugDSC enabled - verbose DSC/datastore logging" "INFO" }
     if ($DryRun) {
         Write-Log "[DRY RUN] Analyze only, no migration" "WARNING"
     }
@@ -424,7 +481,7 @@ function Main {
         # 2. Pre-fetch cluster Host and Datastore Cluster resources
         $clusterResources = @{}
         foreach ($clusterName in $vsphereClusters) {
-            $res = Get-ClusterResources -ClusterName $clusterName
+            $res = Get-ClusterResources -ClusterName $clusterName -DebugDSC:$DebugDSC
             $clusterResources[$clusterName] = $res
             if ($res) {
                 Write-Log "Cluster $clusterName: $($res.Hosts.Count) Hosts, DSC-prod: $($res.DatastoresProd.Count) DS, DSC-nonprod: $($res.DatastoresNonprod.Count) DS" "INFO"
@@ -488,69 +545,110 @@ function Main {
             return
         }
 
-        # 4. Execute migration in batches
-        $totalBatches = [Math]::Ceiling($migrationPlan.Count / $BatchSize)
-        $batchIndex = 0
+        # 4. Execute migration - sliding window: keep 5 running, start new when one completes
         $successCount = 0
         $failCount = 0
+        $allSuccess = @()
 
-        for ($i = 0; $i -lt $migrationPlan.Count; $i += $BatchSize) {
-            $batchIndex++
-            $batch = $migrationPlan[$i..([Math]::Min($i + $BatchSize - 1, $migrationPlan.Count - 1))]
-            Write-Log "---------- Batch $batchIndex / $totalBatches ($($batch.Count) VMs) ----------"
-
-            if ($DryRun) {
-                foreach ($item in $batch) {
-                    Write-Log "[DRY RUN] $($item.VM.Name) [env=$($item.VMEnvironment)]: $($item.CurrentCluster) -> $($item.TargetCluster) (Host: $($item.TargetHost.Name), DS: $($item.TargetDatastore.Name))" "INFO"
-                }
-                continue
+        if ($DryRun) {
+            foreach ($item in $migrationPlan) {
+                Write-Log "[DRY RUN] $($item.VM.Name) [env=$($item.VMEnvironment)]: $($item.CurrentCluster) -> $($item.TargetCluster) (Host: $($item.TargetHost.Name), DS: $($item.TargetDatastore.Name))" "INFO"
             }
+        } else {
+            $queue = [System.Collections.ArrayList]@()
+            foreach ($item in $migrationPlan) { [void]$queue.Add($item) }
+            $running = @()  # array of @{ Task; Item }
+            $pollInterval = 10
 
-            # Execute batch migration
-            $batchSuccess = @()
-            foreach ($item in $batch) {
-                $ok = Move-VMToTarget -VM $item.VM -DestinationHost $item.TargetHost -DestinationDatastore $item.TargetDatastore -TargetClusterName $item.TargetCluster
-                if ($ok) {
-                    $batchSuccess += $item
-                } else {
-                    $failCount++
-                }
-            }
-
-            # Only verify Linux VMs via jump host SSH, skip other VMs
-            if ($batchSuccess.Count -gt 0 -and -not $SkipVerification -and $JumpHostConfig.Host) {
-                $linuxBatch = @($batchSuccess | Where-Object { $_.VM.Name -match "linux" })
-                $nonLinuxBatch = @($batchSuccess | Where-Object { $_.VM.Name -notmatch "linux" })
-                if ($linuxBatch.Count -gt 0) {
-                    $waitSec = [Math]::Min($VerificationTimeoutSeconds, 30)
-                    Write-Log "Waiting $waitSec seconds before verifying $($linuxBatch.Count) Linux VM(s) connectivity (SSH 22)..."
-                    Start-Sleep -Seconds $waitSec
-
-                    foreach ($item in $linuxBatch) {
-                        $vmName = $item.VM.Name
-                        $verified = Test-VMReachable -VMName $vmName -JumpConfig $JumpHostConfig -TimeoutSeconds 30
-                        if ($verified) {
-                            $successCount++
-                            Write-Log "VM $vmName migrated and verified (SSH 22 reachable)" "SUCCESS"
-                        } else {
-                            Write-Log "ALERT: VM $vmName SSH port 22 not reachable after migration, manual check required!" "ALERT"
-                            $successCount++
+            if ($MaxConcurrentMigrations -eq 1) {
+                # One at a time: sync Move-VM, verify Linux immediately when done
+                $totalToMigrate = $migrationPlan.Count
+                $completed = 0
+                foreach ($item in $migrationPlan) {
+                    $result = Move-VMToTarget -VM $item.VM -DestinationHost $item.TargetHost -DestinationDatastore $item.TargetDatastore -TargetClusterName $item.TargetCluster
+                    if ($result.Success) {
+                        $allSuccess += $item
+                        $successCount++
+                        $completed++
+                        if (-not $SkipVerification -and $JumpHostConfig.Host -and $item.VM.Name -match "linux") {
+                            $waitSec = [Math]::Min($VerificationTimeoutSeconds, 30)
+                            Start-Sleep -Seconds $waitSec
+                            $verified = Test-VMReachable -VMName $item.VM.Name -JumpConfig $JumpHostConfig -TimeoutSeconds 30
+                            if ($verified) { Write-Log "VM $($item.VM.Name) verified (SSH 22 reachable)" "SUCCESS" }
+                            else { Write-Log "ALERT: VM $($item.VM.Name) SSH port 22 not reachable after migration!" "ALERT" }
                         }
+                    } else {
+                        $failCount++
+                    }
+                    if ($InterMigrationDelaySeconds -gt 0 -and $item -ne $migrationPlan[-1]) {
+                        Start-Sleep -Seconds $InterMigrationDelaySeconds
                     }
                 }
-                if ($nonLinuxBatch.Count -gt 0) {
-                    $successCount += $nonLinuxBatch.Count
-                    Write-Log "$($nonLinuxBatch.Count) non-Linux VM(s) migrated, verification skipped" "INFO"
+            } else {
+                # Sliding window: keep MaxConcurrent running, start new when one completes
+                Write-Log "Sliding window: up to $MaxConcurrentMigrations concurrent, start new when any completes" "INFO"
+                $totalToMigrate = $migrationPlan.Count
+                $completed = 0
+
+                while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+                    # Check completed tasks
+                    $stillRunning = @()
+                    foreach ($r in $running) {
+                        $refreshed = Get-Task -Id $r.Task.Id -ErrorAction SilentlyContinue
+                        $state = if ($refreshed) { $refreshed.State.ToString() } else { 'Unknown' }
+                        if ($state -eq 'Success') {
+                            $allSuccess += $r.Item
+                            $successCount++
+                            $completed++
+                            Write-Log "VM $($r.Item.VM.Name) done ($completed/$totalToMigrate). Starting next..." "SUCCESS"
+                            # Verify Linux VM immediately if jump host configured
+                            if (-not $SkipVerification -and $JumpHostConfig.Host -and $r.Item.VM.Name -match "linux") {
+                                $waitSec = [Math]::Min($VerificationTimeoutSeconds, 30)
+                                Start-Sleep -Seconds $waitSec
+                                $verified = Test-VMReachable -VMName $r.Item.VM.Name -JumpConfig $JumpHostConfig -TimeoutSeconds 30
+                                if ($verified) { Write-Log "VM $($r.Item.VM.Name) verified (SSH 22 reachable)" "SUCCESS" }
+                                else { Write-Log "ALERT: VM $($r.Item.VM.Name) SSH port 22 not reachable after migration!" "ALERT" }
+                            }
+                            # Start next from queue
+                            if ($queue.Count -gt 0) {
+                                if ($InterMigrationDelaySeconds -gt 0) { Start-Sleep -Seconds $InterMigrationDelaySeconds }
+                                $next = $queue[0]; $queue.RemoveAt(0)
+                                $res = Move-VMToTarget -VM $next.VM -DestinationHost $next.TargetHost -DestinationDatastore $next.TargetDatastore -TargetClusterName $next.TargetCluster -RunAsync
+                                if ($res.Success) { $stillRunning += @{ Task = $res.Task; Item = $next } } else { $failCount++; $completed++ }
+                            }
+                        } elseif ($state -eq 'Error') {
+                            $failCount++
+                            $completed++
+                            Write-Log "VM $($r.Item.VM.Name) migration failed" "ERROR"
+                            if ($queue.Count -gt 0) {
+                                if ($InterMigrationDelaySeconds -gt 0) { Start-Sleep -Seconds $InterMigrationDelaySeconds }
+                                $next = $queue[0]; $queue.RemoveAt(0)
+                                $res = Move-VMToTarget -VM $next.VM -DestinationHost $next.TargetHost -DestinationDatastore $next.TargetDatastore -TargetClusterName $next.TargetCluster -RunAsync
+                                if ($res.Success) { $stillRunning += @{ Task = $res.Task; Item = $next } } else { $failCount++; $completed++ }
+                            }
+                        } else {
+                            $stillRunning += $r
+                        }
+                    }
+                    $running = $stillRunning
+
+                    # Fill pool up to MaxConcurrentMigrations
+                    while ($running.Count -lt $MaxConcurrentMigrations -and $queue.Count -gt 0) {
+                        if ($InterMigrationDelaySeconds -gt 0 -and $running.Count -gt 0) { Start-Sleep -Seconds $InterMigrationDelaySeconds }
+                        $next = $queue[0]; $queue.RemoveAt(0)
+                        $res = Move-VMToTarget -VM $next.VM -DestinationHost $next.TargetHost -DestinationDatastore $next.TargetDatastore -TargetClusterName $next.TargetCluster -RunAsync
+                        if ($res.Success) { $running += @{ Task = $res.Task; Item = $next } } else { $failCount++; $completed++ }
+                    }
+
+                    if ($running.Count -gt 0) {
+                        Start-Sleep -Seconds $pollInterval
+                    }
                 }
-            } elseif ($batchSuccess.Count -gt 0) {
-                $successCount += $batchSuccess.Count
-                Write-Log "Verification skipped, assuming $($batchSuccess.Count) migration(s) successful" "INFO"
             }
 
-            # Brief pause between batches to reduce vCenter load
-            if ($i + $BatchSize -lt $migrationPlan.Count) {
-                Write-Log "Waiting 10 seconds before next batch..."
-                Start-Sleep -Seconds 10
+            # Linux VMs verified immediately when each migration completes
+            if (($allSuccess | Where-Object { $_.VM.Name -notmatch "linux" }).Count -gt 0) {
+                Write-Log "$(($allSuccess | Where-Object { $_.VM.Name -notmatch "linux" }).Count) non-Linux VM(s) migrated, verification skipped" "INFO"
             }
         }
 
