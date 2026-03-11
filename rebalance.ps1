@@ -12,10 +12,13 @@
 #   .\vm_cluster_rebalance.ps1 -NoPrompt          # Auto run, no key prompt
 #   .\vm_cluster_rebalance.ps1 -MaxConcurrent 5  # Sliding window: 5 concurrent, start new when any completes
 #   .\vm_cluster_rebalance.ps1 -InterMigrationDelay 60  # Wait 60s after each VM for storage to settle
+#   .\vm_cluster_rebalance.ps1 -MigrationPlanCsv plan.csv  # Save migration plan to CSV
 
 param(
     [Parameter(Mandatory=$false)]
     [string]$LogFile = "vm_cluster_rebalance_log.txt",
+    [Parameter(Mandatory=$false)]
+    [string]$MigrationPlanCsv = "vm_cluster_rebalance_migration_plan.csv",
     [Parameter(Mandatory=$false)]
     [int]$MaxConcurrentMigrations = 5,
     [Parameter(Mandatory=$false)]
@@ -504,6 +507,23 @@ function Main {
         Write-Log "VMs to migrate: $($migrationPlan.Count)"
         foreach ($item in $migrationPlan) {
             Write-Log "  [env=$($item.VMEnvironment)] $($item.VM.Name): $($item.CurrentCluster) -> $($item.TargetCluster) (DS: $($item.TargetDatastore.Name))" "INFO"
+        }
+
+        # Save migration plan to CSV
+        if ($migrationPlan.Count -gt 0) {
+            $csvData = $migrationPlan | ForEach-Object {
+                [PSCustomObject]@{
+                    VMName          = $_.VM.Name
+                    BuildId         = $_.BuildId
+                    VMEnvironment   = $_.VMEnvironment
+                    CurrentCluster  = $_.CurrentCluster
+                    TargetCluster   = $_.TargetCluster
+                    TargetHost      = $_.TargetHost.Name
+                    TargetDatastore = $_.TargetDatastore.Name
+                }
+            }
+            $csvData | Export-Csv -Path $MigrationPlanCsv -NoTypeInformation -Encoding UTF8
+            Write-Log "Migration plan saved to $MigrationPlanCsv" "INFO"
         }
 
         if ($migrationPlan.Count -eq 0) {
