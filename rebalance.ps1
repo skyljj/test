@@ -2,8 +2,9 @@
 # Function: Connect to vCenter, rebalance VMs across core-01/core-02/core-03 clusters by buildid algorithm
 # Cluster order: [core-02, core-03, core-01] - core-03 is high-performance cluster
 #
-# Algorithm: buildid = digits from VM name, index = buildid % 3, cluster = vsphere_cluster[index]
-#            ESXi/Datastore distributed by buildid % count
+# Algorithm: cluster = buildid % cluster_count
+#            host = (buildid / cluster_count) % host_count
+#            ds   = (buildid / cluster_count) % datastore_count
 #
 # Usage:
 #   .\vm_cluster_rebalance.ps1                    # Default run
@@ -119,14 +120,18 @@ function Get-TargetCluster {
 }
 
 # Select target from list by buildid (ESXi or Datastore)
-function Get-TargetByBuildId {
+# cluster = vm_id % cluster_count
+# host/ds = (vm_id / cluster_count) % host_count  - better distribution when same cluster gets many VMs
+function Get-TargetByBuildIdWithinCluster {
     param(
         [int]$BuildId,
+        [int]$ClusterCount,
         [array]$Items
     )
     $count = $Items.Count
     if ($count -eq 0) { return $null }
-    $index = $BuildId % $count
+    $groupIndex = [Math]::Floor($BuildId / $ClusterCount)
+    $index = $groupIndex % $count
     return $Items[$index]
 }
 
@@ -490,8 +495,9 @@ function Main {
                 continue
             }
 
-            $targetHost = Get-TargetByBuildId -BuildId $buildId -Items $resources.Hosts
-            $targetDs = Get-TargetByBuildId -BuildId $buildId -Items $targetDatastores
+            $clusterCount = $vsphereClusters.Count
+            $targetHost = Get-TargetByBuildIdWithinCluster -BuildId $buildId -ClusterCount $clusterCount -Items $resources.Hosts
+            $targetDs = Get-TargetByBuildIdWithinCluster -BuildId $buildId -ClusterCount $clusterCount -Items $targetDatastores
 
             $migrationPlan += [PSCustomObject]@{
                 VM              = $vm
