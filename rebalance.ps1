@@ -3,8 +3,7 @@
 # Cluster order: [core-02, core-03, core-01] - core-03 is high-performance cluster
 #
 # Algorithm: cluster = buildid % cluster_count
-#            host = (buildid / cluster_count) % host_count
-#            ds   = (buildid / cluster_count) % datastore_count
+#            host/ds = round-robin within cluster (even distribution when many VMs have buildid=1)
 #
 # Usage:
 #   .\vm_cluster_rebalance.ps1                    # Default run
@@ -119,19 +118,18 @@ function Get-TargetCluster {
     return $Clusters[$index]
 }
 
-# Select target from list by buildid (ESXi or Datastore)
-# cluster = vm_id % cluster_count
-# host/ds = (vm_id / cluster_count) % host_count  - better distribution when same cluster gets many VMs
-function Get-TargetByBuildIdWithinCluster {
+# Round-robin: pick next host/datastore from list, ensures even distribution when many VMs have same buildid (e.g. xxx1,yyy1)
+# cluster = buildid % cluster_count (unchanged)
+# host/ds = round-robin within cluster (first VM gets first, second gets second, ... wraps around)
+function Get-NextByRoundRobin {
     param(
-        [int]$BuildId,
-        [int]$ClusterCount,
-        [array]$Items
+        [array]$Items,
+        [ref]$CounterRef
     )
     $count = $Items.Count
     if ($count -eq 0) { return $null }
-    $groupIndex = [Math]::Floor($BuildId / $ClusterCount)
-    $index = $groupIndex % $count
+    $index = $CounterRef.Value % $count
+    $CounterRef.Value++
     return $Items[$index]
 }
 
@@ -465,6 +463,15 @@ function Main {
         }
 
         # 3. Analyze each VM for migration target
+        # Round-robin counters per cluster (and per env for datastore): ensures even host/ds distribution
+        $clusterHostCounter = @{}
+        $clusterDsCounter = @{}
+        foreach ($cn in $vsphereClusters) {
+            $clusterHostCounter[$cn] = 0
+            $clusterDsCounter["$cn-prod"] = 0
+            $clusterDsCounter["$cn-nonprod"] = 0
+        }
+
         $migrationPlan = @()
         foreach ($vm in $allVMs) {
             $buildId = Get-BuildIdFromVMName -VMName $vm.Name
@@ -495,9 +502,13 @@ function Main {
                 continue
             }
 
-            $clusterCount = $vsphereClusters.Count
-            $targetHost = Get-TargetByBuildIdWithinCluster -BuildId $buildId -ClusterCount $clusterCount -Items $resources.Hosts
-            $targetDs = Get-TargetByBuildIdWithinCluster -BuildId $buildId -ClusterCount $clusterCount -Items $targetDatastores
+            $dsKey = "$targetCluster-$vmEnvironment"
+            $hostCounterRef = [ref]$clusterHostCounter[$targetCluster]
+            $dsCounterRef = [ref]$clusterDsCounter[$dsKey]
+            $targetHost = Get-NextByRoundRobin -Items $resources.Hosts -CounterRef $hostCounterRef
+            $clusterHostCounter[$targetCluster] = $hostCounterRef.Value
+            $targetDs = Get-NextByRoundRobin -Items $targetDatastores -CounterRef $dsCounterRef
+            $clusterDsCounter[$dsKey] = $dsCounterRef.Value
 
             $migrationPlan += [PSCustomObject]@{
                 VM              = $vm
