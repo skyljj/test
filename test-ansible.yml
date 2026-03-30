@@ -112,3 +112,52 @@
     boot_order:
       - disk
       - network
+
+---
+# add_pxe_adapter.yml - Add new network adapter with PXE VLAN
+# Adds a new network adapter to the VM and assigns it to the PXE VLAN
+# Network adapter 1 is typically empty (previously used for PXE then deleted)
+# Network adapter 2 is the data network adapter
+
+- name: Get VM network adapter info to find dvswitch
+  community.vmware.vmware_guest_network:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs | default(false) }}"
+    name: "{{ vm_name }}"
+    gather_network_info: true
+  delegate_to: localhost
+  register: vm_network_info
+
+- name: Extract dvswitch name from existing adapter
+  set_fact:
+    vm_dvswitch_name: "{{ vm_network_info.network_info | map(attribute='switch') | select('defined') | first }}"
+
+- name: Log dvswitch name
+  debug:
+    msg: "VM '{{ vm_name }}' is connected to dvswitch: {{ vm_dvswitch_name }}"
+
+- name: Get all portgroups on the dvswitch
+  community.vmware.vmware_dvs_portgroup_find:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs | default(false) }}"
+    dvswitch: "{{ vm_dvswitch_name }}"
+    vlanid: 199
+  delegate_to: localhost
+  register: pxe_portgroup_result
+
+- name: Fail if no portgroup with VLAN 199 found
+  fail:
+    msg: "No portgroup with VLAN ID 199 found on dvswitch '{{ vm_dvswitch_name }}'"
+  when: pxe_portgroup_result.dvs_portgroups | length == 0
+
+- name: Set PXE VLAN name from dvswitch portgroup
+  set_fact:
+    pxe_vlan_name: "{{ pxe_portgroup_result.dvs_portgroups[0].name }}"
+
+- name: Log PXE VLAN name
+  debug:
+    msg: "Found PXE VLAN portgroup: {{ pxe_vlan_name }} (VLAN 199) on dvswitch {{ vm_dvswitch_name }}"
