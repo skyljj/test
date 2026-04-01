@@ -158,6 +158,28 @@
   set_fact:
     pxe_vlan_name: "{{ pxe_portgroup_result.dvs_portgroups[0].name }}"
 
+
 - name: Log PXE VLAN name
   debug:
     msg: "Found PXE VLAN portgroup: {{ pxe_vlan_name }} (VLAN 199) on dvswitch {{ vm_dvswitch_name }}"
+
+
+- name: Backup cert file on VM to backup directory
+  ansible.builtin.shell: |
+    set -e
+    install -d -m 0755 "{{ vm_reimage_cert_backup_dir }}"
+    test -f "{{ vm_reimage_cert_src }}"
+    cp -a "{{ vm_reimage_cert_src }}" "{{ vm_reimage_cert_backup_dir }}/"
+  delegate_to: "vm_reimage_ssh_{{ vm_name }}"
+  become: "{{ vm_reimage_ssh_become | default(true) }}"
+  
+    - name: Restore cert to /var/lib and restart node exporter
+  ansible.builtin.shell: |
+    set -e
+    backup_file="{{ vm_reimage_cert_backup_dir }}/{{ vm_reimage_cert_src | basename }}"
+    test -f "$backup_file"
+    mv "$backup_file" "{{ vm_reimage_cert_src }}"
+    systemctl restart "{{ vm_reimage_node_exporter_service }}"
+  delegate_to: "vm_reimage_ssh_restore_{{ vm_name }}"
+  become: "{{ vm_reimage_ssh_become | default(true) }}"
+  when: vm_ssh_host_restore | length > 0
