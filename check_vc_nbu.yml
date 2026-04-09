@@ -1,0 +1,179 @@
+---
+# NetBackup connection
+nbu_primary_server: ""
+nbu_api_key: ""
+nbu_validate_certs: false
+nbu_api_accept: "application/vnd.netbackup+json;version=1.0"
+
+# Which backup host to use for validation (must be whitelisted on NBU)
+nbu_validation_host: ""
+
+# Labels (for metrics)
+nbu_site: ""
+nbu_env: ""
+
+# node_exporter textfile collector
+nbu_textfile_dir: "/run/textfile"
+nbu_metric_filename: "nbu_vcenter_credential.prom"
+
+
+
+---
+- name: Normalize location (shg/bjv)
+  ansible.builtin.set_fact:
+    location: "{{ location | default(env | default('shg')) | lower }}"
+
+- name: Validate required variables
+  ansible.builtin.fail:
+    msg: "{{ item.name }} is required but not defined"
+  when: item.value | default('') | string | trim | length == 0
+  loop:
+    - { name: "location", value: "{{ location }}" }
+    - { name: "nbu_validation_host", value: "{{ nbu_validation_host }}" }
+
+- name: Collect all primary env keys for this location (e.g. shgms/shgbi)
+  ansible.builtin.set_fact:
+    location_env_keys: >-
+      {{
+        (master_server_dict | default({}) | dict2items)
+        | selectattr('key', 'match', '^' ~ location)
+        | map(attribute='key')
+        | list
+      }}
+
+- name: Fail if no primaries defined for location
+  ansible.builtin.fail:
+    msg: "No primary servers found in master_server_dict for location={{ location }}"
+  when: location_env_keys | length == 0
+
+- name: Initialize metrics lines
+  ansible.builtin.set_fact:
+    nbu_metrics_lines: []
+
+- name: Loop all primaries in this location and validate all vCenters
+  include_tasks: check_vc_credential.yml
+  loop: "{{ location_env_keys }}"
+  loop_control:
+    loop_var: env_key
+    label: "{{ env_key }}"
+
+- name: Add last run timestamp metric
+  ansible.builtin.set_fact:
+    nbu_metrics_lines: "{{ (nbu_metrics_lines | default([])) + [ts_line] }}"
+  vars:
+    label_site: "{{ nbu_site | default('') }}"
+    ts_line: "nbu_vcenter_credential_last_run_timestamp_seconds{site=\"{{ label_site }}\",location=\"{{ location }}\"} {{ ansible_date_time.epoch }}"
+
+- name: Ensure textfile directory exists
+  ansible.builtin.file:
+    path: "{{ nbu_textfile_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Write metrics file atomically
+  ansible.builtin.copy:
+    dest: "{{ nbu_textfile_dir }}/.{{ nbu_metric_filename }}.tmp"
+    content: |-
+      # HELP nbu_vcenter_credential_valid NetBackup vCenter credential validation result (1=valid,0=invalid).
+      # TYPE nbu_vcenter_credential_valid gauge
+      {% for l in nbu_metrics_lines | default([]) %}
+      {{ l }}
+      {% endfor %}
+    mode: "0644"
+
+- name: Move temp metrics file into place
+  ansible.builtin.command:
+    cmd: "mv {{ nbu_textfile_dir }}/.{{ nbu_metric_filename }}.tmp {{ nbu_textfile_dir }}/{{ nbu_metric_filename }}"
+  changed_when: true
+
+
+
+
+
+-------------------
+- name: Set primary server and api key for env
+  ansible.builtin.set_fact:
+    nbu_env: "{{ env_key }}"
+    nbu_primary_server: "{{ master_server_dict[env_key] }}"
+    nbu_api_key: "{{ api_key_dict[env_key] }}"
+    nbu_api_base: "https://{{ master_server_dict[env_key] }}:1556/netbackup"
+    nbu_headers:
+      Authorization: "{{ api_key_dict[env_key] }}"
+      Accept: "{{ nbu_api_accept }}"
+      Content-Type: "application/json"
+
+- name: List configured VMware servers (vCenters) from this NBU primary
+  ansible.builtin.uri:
+    url: "{{ nbu_api_base }}/config/servers/vmservers"
+    method: GET
+    headers: "{{ nbu_headers }}"
+    validate_certs: "{{ nbu_validate_certs | default(false) }}"
+    return_content: true
+    status_code: [200, 401, 403, 404]
+  register: nbu_vmservers_list
+  delegate_to: localhost
+
+- name: Fail if cannot list vmservers from this primary
+  ansible.builtin.fail:
+    msg: "Failed to list vmservers from {{ nbu_primary_server }} (env={{ nbu_env }}) HTTP {{ nbu_vmservers_list.status }}: {{ nbu_vmservers_list.json | default(nbu_vmservers_list.content | default('')) }}"
+  when: nbu_vmservers_list.status != 200
+
+- name: Normalize vmserver names
+  ansible.builtin.set_fact:
+    nbu_vmserver_names: >-
+      {{
+        (
+          (nbu_vmservers_list.json.data | default([]))
+          | map(attribute='serverName') | select('defined') | list
+        )
+        if ((nbu_vmservers_list.json.data | default([])) | length > 0)
+        else
+        (
+          (nbu_vmservers_list.json.data | default({})).vmservers | default([])
+          | map(attribute='serverName') | select('defined') | list
+        )
+      }}
+
+- name: Fallback normalize vmserver names (alternate keys)
+  ansible.builtin.set_fact:
+    nbu_vmserver_names: >-
+      {{
+        (nbu_vmservers_list.json | default({})).vmservers | default([])
+        | map(attribute='name') | select('defined') | list
+      }}
+  when: nbu_vmserver_names | default([]) | length == 0
+
+- name: Validate credential for each vCenter (this primary)
+  ansible.builtin.uri:
+    url: "{{ nbu_api_base }}/config/servers/vmservers/{{ item }}/validate-credential"
+    method: POST
+    headers: "{{ nbu_headers }}"
+    body_format: json
+    body:
+      validationHost: "{{ nbu_validation_host }}"
+    validate_certs: "{{ nbu_validate_certs | default(false) }}"
+    return_content: true
+    status_code: [200, 201, 400, 401, 403, 404, 409, 500]
+  register: nbu_validate_results
+  delegate_to: localhost
+  loop: "{{ nbu_vmserver_names }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Append metrics lines (this primary)
+  ansible.builtin.set_fact:
+    nbu_metrics_lines: "{{ nbu_metrics_lines + [metric_line] }}"
+  vars:
+    vcenter_name: "{{ item.item }}"
+    http_ok: "{{ item.status in [200, 201] }}"
+    raw_status: >-
+      {{
+        (item.json.data.credentialValidationStatus | default(item.json.credentialValidationStatus | default(item.json.status | default('unknown'))))
+        if (item.json is defined) else 'unknown'
+      }}
+    valid_value: "{{ 1 if http_ok and (raw_status | string | lower) in ['valid', 'successful', 'success', 'ok', 'true'] else (1 if http_ok and raw_status == 'unknown' else 0) }}"
+    metric_line: >-
+      nbu_vcenter_credential_valid{site="{{ nbu_site | default('') }}",env="{{ nbu_env }}",nbu_primary="{{ nbu_primary_server }}",vcenter="{{ vcenter_name }}",raw_status="{{ raw_status | string | regex_replace('\"','\\\\\"') }}"} {{ valid_value }}
+  loop: "{{ nbu_validate_results.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
