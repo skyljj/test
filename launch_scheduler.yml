@@ -1,0 +1,104 @@
+---
+- name: Parse input payload and launch Controller template per server
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    servers_list: "{{ issues.servers | default([]) }}"
+    target_os_version: "{{ issues.target_os | default('') }}"
+
+    # Controller/AWX connection (建议用环境变量注入密码)
+    controller_host: "{{ lookup('ansible.builtin.env', 'CONTROLLER_HOST') | default('', true) }}"
+    controller_username: "{{ lookup('ansible.builtin.env', 'CONTROLLER_USERNAME') | default('', true) }}"
+    controller_password: "{{ lookup('ansible.builtin.env', 'CONTROLLER_PASSWORD') | default('', true) }}"
+    controller_validate_certs: "{{ (lookup('ansible.builtin.env', 'CONTROLLER_VERIFY_SSL') | default('true', true)) | bool }}"
+
+    # 你要触发的 Job Template（name 或 id 均可；推荐 name）
+    controller_job_template: "{{ lookup('ansible.builtin.env', 'CONTROLLER_JOB_TEMPLATE') | default('', true) }}"
+
+  tasks:
+    - name: Validate required inputs
+      ansible.builtin.fail:
+        msg: "{{ item }}"
+      when: item_when
+      loop:
+        - "issues.servers is required"
+        - "issues.target_os is required"
+        - "metadata is required"
+        - "CONTROLLER_HOST is required (or set controller_host)"
+        - "CONTROLLER_USERNAME is required (or set controller_username)"
+        - "CONTROLLER_PASSWORD is required (or set controller_password)"
+        - "CONTROLLER_JOB_TEMPLATE is required (or set controller_job_template)"
+      vars:
+        item_when: >-
+          {{
+            (item == "issues.servers is required" and (servers_list | length == 0))
+            or (item == "issues.target_os is required" and (target_os_version | string | trim | length == 0))
+            or (item == "metadata is required" and ((metadata | default({})) | length == 0))
+            or (item == "CONTROLLER_HOST is required (or set controller_host)" and (controller_host | string | trim | length == 0))
+            or (item == "CONTROLLER_USERNAME is required (or set controller_username)" and (controller_username | string | trim | length == 0))
+            or (item == "CONTROLLER_PASSWORD is required (or set controller_password)" and (controller_password | string | trim | length == 0))
+            or (item == "CONTROLLER_JOB_TEMPLATE is required (or set controller_job_template)" and (controller_job_template | string | trim | length == 0))
+          }}
+
+    - name: Build server_labels list (label/vm_name per server)
+      ansible.builtin.set_fact:
+        server_labels: "{{ (server_labels | default([])) + [server_label] }}"
+      vars:
+        server_displayname: "{{ item }}"
+        server_meta: >-
+          {{
+            (
+              metadata
+              | default({})
+              | dict2items
+              | map(attribute='value')
+              | selectattr('displayname', 'equalto', server_displayname)
+              | list
+              | first
+            )
+            | default({})
+          }}
+        server_label: "{{ server_meta.label | default('') }}"
+      loop: "{{ servers_list }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Show computed server_labels
+      ansible.builtin.debug:
+        var: server_labels
+
+    - name: Fail if any server missing metadata mapping (empty label)
+      ansible.builtin.fail:
+        msg: "metadata 中有 server 的 label 为空（请检查 metadata.displayname 是否能匹配 issues.servers）"
+      when: item | string | trim | length == 0
+      loop: "{{ server_labels | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Launch Controller/AWX job template per server label
+      ansible.controller.job_launch:
+        controller_host: "{{ controller_host }}"
+        controller_username: "{{ controller_username }}"
+        controller_password: "{{ controller_password }}"
+        validate_certs: "{{ controller_validate_certs }}"
+        job_template: "{{ controller_job_template }}"
+        extra_vars:
+          vm_name: "{{ item }}"
+          target_os_version: "{{ target_os_version }}"
+      register: launch_results
+      loop: "{{ server_labels | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Show launched job results
+      ansible.builtin.debug:
+        msg:
+          extra_vars:
+            vm_name: "{{ item.item }}"
+            target_os_version: "{{ target_os_version }}"
+          job: "{{ item.job | default(omit) }}"
+          id: "{{ item.id | default(omit) }}"
+          url: "{{ item.url | default(omit) }}"
+      loop: "{{ launch_results.results | default([]) }}"
+
