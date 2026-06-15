@@ -21,3 +21,24 @@
       {% else %}
       No VolumeAttachments found.
       {% endif %}
+      
+- name: Debug VolumeAttachments status
+  ansible.builtin.debug:
+    msg: >-
+      {% set attached_vas = va_results.resources | selectattr('status.attached', 'defined') | selectattr('status.attached', 'equalto', true) | list %}
+      {% if attached_vas | length > 0 %}
+      Found {{ attached_vas | length }} active VolumeAttachments (Status: Attached=true):
+      ====================================================================
+      {% for va in attached_vas %}
+      VolumeAttachment: {{ va.metadata.name }}
+      Node: {{ va.spec.nodeName }}
+      Volume: {{ va.spec.source.persistentVolumeName | default('N/A') }}
+      Status (Attached): {{ va.status.attached }}
+      {% if va.metadata.deletionTimestamp is defined %}
+      Warning: Deletion in progress (deletionTimestamp is set but block device is still locked).
+      {% endif %}
+      --------------------------------------------------------------------
+      {% endfor %}
+      {% else %}
+      No active VolumeAttachments (Attached=true) found in the cluster.
+      {% endif %}
