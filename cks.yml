@@ -1,0 +1,23 @@
+- name: Get VolumeAttachments from OpenShift
+  delegate_to: localhost
+  kubernetes.core.k8s_info:
+    api_version: storage.k8s.io/v1
+    kind: VolumeAttachment
+    # 如果你的 kubeconfig 不在默认路径，请取消注释并修改下方路径
+    # kubeconfig: "{{ ansible_env.HOME }}/.kube/config"
+  register: va_results
+
+- name: Debug VolumeAttachments status
+  ansible.builtin.debug:
+    msg: >-
+      {% if va_results.resources | length > 0 %}
+      {% for va in va_results.resources %}
+      VolumeAttachment: {{ va.metadata.name }}
+      Node: {{ va.spec.nodeName }}
+      Volume: {{ va.spec.source.persistentVolumeName | default('N/A') }}
+      Status (Attached): {{ va.status.attached }}
+      -----------------------------------------
+      {% endfor %}
+      {% else %}
+      No VolumeAttachments found.
+      {% endif %}
