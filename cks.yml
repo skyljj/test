@@ -42,3 +42,38 @@
       {% else %}
       No active VolumeAttachments (Attached=true) found in the cluster.
       {% endif %}
+
+- name: Get all Pods from Cluster
+      kubernetes.core.k8s_info:
+        kind: Pod
+      register: pod_results
+
+    - name: Debug Remaining Pods on Worker Nodes
+      ansible.builtin.debug:
+        msg: >-
+          {% set worker_pods = [] %}
+          {% for pod in pod_results.resources %}
+            {# 直接判断节点名称中是否包含 'worker' 关键字 #}
+            {% if pod.spec.nodeName is defined and 'worker' in pod.spec.nodeName %}
+              {% set _ = worker_pods.append(pod) %}
+            {% endif %}
+          {% endfor %}
+          
+          {% if worker_pods | length > 0 %}
+          [INFO] Found {{ worker_pods | length }} Pods still technically "running" on the shutdown Worker nodes:
+          ====================================================================
+          {% for pod in worker_pods %}
+          Namespace: {{ pod.metadata.namespace }}
+          Pod Name: {{ pod.metadata.name }}
+          Node (Shutdown): {{ pod.spec.nodeName }}
+          Status in etcd: {{ pod.status.phase }}
+          {% if pod.metadata.deletionTimestamp is defined %}
+          Mark: Terminating (Stuck because Kubelet is offline)
+          {% else %}
+          Mark: Active (Master thinks it's perfectly fine!)
+          {% endif %}
+          --------------------------------------------------------------------
+          {% endfor %}
+          {% else %}
+          [OK] Clean! No Pods are left on any Worker nodes.
+          {% endif %}
