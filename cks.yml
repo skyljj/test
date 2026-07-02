@@ -124,3 +124,60 @@
           {% else %}
           [OK] Clean! No Pods are left on any Worker nodes.
           {% endif %}
+
+
+
+---
+- name: Force Drain Worker Nodes and Verify Status
+  hosts: localhost
+  gather_facts: false
+
+  tasks:
+    # ==================== STEP 1: GET CURRENT WORKER NODES ====================
+    - name: Fetch all node information from the cluster
+      kubernetes.core.k8s_info:
+        kind: Node
+      register: node_results
+
+    # ==================== STEP 2: FORCE DRAIN WORKERS ====================
+    - name: Force drain worker nodes
+      kubernetes.core.k8s_drain:
+        name: "{{ item.metadata.name }}"
+        state: drain
+        # force: true ignores pods not managed by a replication controller/replicaSet/DaemonSet
+        force: true
+        # ignore_daemonsets: true allows evicting business pods while leaving node-infra pods intact
+        ignore_daemonsets: true
+        delete_options:
+          # grace_period: 0 forces immediate eviction to accelerate maintenance windows
+          grace_period: 0
+          # Setting ignore_w_no_controller to true prevents being blocked by naked pods
+          ignore_w_no_controller: true
+      loop: "{{ node_results.resources }}"
+      # Dynamically targets only your worker nodes
+      when: "'worker' in item.metadata.name"
+
+    # ==================== STEP 3: VERIFY DRAINED STATUS ====================
+    - name: Fetch node status post-drain for validation
+      kubernetes.core.k8s_info:
+        kind: Node
+      register: post_drain_node_results
+
+    - name: Debug and verify worker node status
+      ansible.builtin.debug:
+        msg: >-
+          {% set worker_nodes = [] %}
+          {% for node in post_drain_node_results.resources %}
+            {% if 'worker' in node.metadata.name %}
+              {% set _ = worker_nodes.append(node) %}
+            {% endif %}
+          {% endfor %}
+
+          Verification Results for Worker Nodes:
+          ====================================================================
+          {% for node in worker_nodes %}
+          Node Name: {{ node.metadata.name }}
+          Unschedulable (Cordoned): {{ node.spec.unschedulable | default(false) }}
+          Status: {% if node.spec.unschedulable | default(false) == true %}✅ [READY] Node is cordoned/SchedulingDisabled.{% else %}❌ [FAILED] Node is still active!{% endif %}
+          --------------------------------------------------------------------
+          {% endfor %}
