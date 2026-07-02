@@ -74,6 +74,53 @@
           {% endif %}
           --------------------------------------------------------------------
           {% endfor %}
+
+
+
+- name: Debug Remaining Pods on Worker Nodes (Excluding DaemonSets)
+      ansible.builtin.debug:
+        msg: >-
+          {% set worker_non_ds_pods = [] %}
+          {% for pod in pod_results.resources %}
+            {# 1. Check if the pod is scheduled on a worker node #}
+            {% if pod.spec.nodeName is defined and 'worker' in pod.spec.nodeName %}
+              
+              {# 2. Check if the pod is managed by a DaemonSet #}
+              {% set is_daemonset = false %}
+              {% if pod.metadata.ownerReferences is defined %}
+                {% for owner in pod.metadata.ownerReferences %}
+                  {% if owner.kind == 'DaemonSet' %}
+                    {% set is_daemonset = true %}
+                  {% endif %}
+                {% endfor %}
+              {% endif %}
+              
+              {# 3. If it is a worker pod and NOT a DaemonSet, collect it #}
+              {% if not is_daemonset %}
+                {% set _ = worker_non_ds_pods.append(pod) %}
+              {% endif %}
+
+            {% endif %}
+          {% endfor %}
+          
+          {% if worker_non_ds_pods | length > 0 %}
+          [INFO] Found {{ worker_non_ds_pods | length }} regular Pods (Excluding DaemonSets) still stuck on shutdown Workers:
+          ====================================================================
+          {% for pod in worker_non_ds_pods %}
+          Namespace: {{ pod.metadata.namespace }}
+          Pod Name: {{ pod.metadata.name }}
+          Node (Shutdown): {{ pod.spec.nodeName }}
+          Status in etcd: {{ pod.status.phase }}
+          {% if pod.metadata.deletionTimestamp is defined %}
+          Mark: Terminating (Stuck because Kubelet is offline)
+          {% else %}
+          Mark: Active (Master still thinks it's running!)
+          {% endif %}
+          --------------------------------------------------------------------
+          {% endfor %}
+          {% else %}
+          [OK] Clean! No regular business Pods left on any Worker nodes (All clear for storage detachment check).
+          {% endif %}
           {% else %}
           [OK] Clean! No Pods are left on any Worker nodes.
           {% endif %}
