@@ -37,27 +37,31 @@
       register: chg_query_results
       when: chg_candidates | length > 0
 
-    # 步骤 3 & 4：双重条件筛选 (Standard CHG 且 Affected System == Linux)
-    - name: Filter target_CHG with type 'standard CHG' and system 'Linux'
+- name: Filter target_CHG with type 'standard CHG' and system 'Linux'
       ansible.builtin.set_fact:
         target_CHG: >-
           {%- set targets = [] -%}
           {%- if chg_query_results.results is defined -%}
             {%- for res in chg_query_results.results -%}
-              {# 1. 获取 Ticket Type (根据接口实际字段调整名字) #}
-              {%- set t_type = res.json.type | default(res.json.ticket_type | default('')) -%}
-              
-              {# 2. 获取 Affected System (根据接口实际字段调整名字，如 res.json.affected_system) #}
-              {%- set t_system = res.json.affected_system | default(res.json.system | default('')) -%}
-              
-              {# 3. 判断：类型为 Standard CHG 且 系统为 Linux (不区分大小写) #}
-              {%- if (t_type | lower == 'standard chg') and (t_system | lower == 'linux') -%}
-                {%- set _ = targets.append(res.item) -%}
-              {%- endif -%}
+              {# 确保请求成功且返回的 issues 字典里包含当前单号 #}
+              {%- if res.json is defined and res.json.issues is defined and res.item in res.json.issues -%}
+                {%- set issue_data = res.json.issues[res.item] -%}
+                
+                {# 1. 获取单据类型 #}
+                {%- set t_type = issue_data.issue_type | default('') -%}
+                
+                {# 2. 获取受影响服务列表，并做不区分大小写的转换 #}
+                {%- set raw_services = issue_data.affected_service | default([]) -%}
+                {%- set services_lower = raw_services | map('lower') | list -%}
+                
+                {# 3. 条件判断：类型为 'standard chg' 且 'linux' 在 affected_service 列表中 #}
+                {%- if (t_type | lower == 'standard chg') and ('linux' in services_lower) -%}
+                  {%- set _ = targets.append(res.item) -%}
+                {%- endif -%}
+              {%- me -%} {# 容错处理 #}
             {%- endfor -%}
           {%- endif -%}
           {{ targets }}
-
     - name: Output filtered target CHG list
       ansible.builtin.debug:
         var: target_CHG
