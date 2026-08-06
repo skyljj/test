@@ -1,0 +1,63 @@
+---
+- name: Query ITSM Linked CHG Tickets
+  hosts: localhost
+  gather_facts: false
+  vars:
+    itsm_api_base: "https://itsm.example.com/api/v1"
+    auth_headers:
+      Authorization: "Bearer YOUR_API_TOKEN"
+      Content-Type: "application/json"
+    
+    # 假设这是上一步获得的 ticket_info 变量
+    # ticket_info: "{{ response.json }}"
+
+  tasks:
+    # 步骤 1：提取所有 outwardIssue 以 CHG 开头的单号
+    - name: Extract CHG ticket IDs from linked Issues
+      ansible.builtin.set_fact:
+        chg_candidates: >-
+          {%- set chgs = [] -%}
+          {%- for issue in ticket_info['linked Issues'] | default([]) -%}
+            {%- set val = issue.outwardIssue.key if (issue.outwardIssue is mapping) else issue.outwardIssue -%}
+            {%- if val is defined and val is regex('^CHG') -%}
+              {%- set _ = chgs.append(val) -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ chgs }}
+
+    # 步骤 2：遍历 API 查询每一个 CHG 单据的详细信息
+    - name: Query details for each CHG ticket
+      ansible.builtin.uri:
+        url: "{{ itsm_api_base }}/tickets/{{ item }}"
+        method: GET
+        headers: "{{ auth_headers }}"
+        return_content: true
+        status_code: [200]
+      loop: "{{ chg_candidates }}"
+      register: chg_query_results
+      when: chg_candidates | length > 0
+
+    # 步骤 3 & 4：双重条件筛选 (Standard CHG 且 Affected System == Linux)
+    - name: Filter target_CHG with type 'standard CHG' and system 'Linux'
+      ansible.builtin.set_fact:
+        target_CHG: >-
+          {%- set targets = [] -%}
+          {%- if chg_query_results.results is defined -%}
+            {%- for res in chg_query_results.results -%}
+              {# 1. 获取 Ticket Type (根据接口实际字段调整名字) #}
+              {%- set t_type = res.json.type | default(res.json.ticket_type | default('')) -%}
+              
+              {# 2. 获取 Affected System (根据接口实际字段调整名字，如 res.json.affected_system) #}
+              {%- set t_system = res.json.affected_system | default(res.json.system | default('')) -%}
+              
+              {# 3. 判断：类型为 Standard CHG 且 系统为 Linux (不区分大小写) #}
+              {%- if (t_type | lower == 'standard chg') and (t_system | lower == 'linux') -%}
+                {%- set _ = targets.append(res.item) -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+          {{ targets }}
+
+    - name: Output filtered target CHG list
+      ansible.builtin.debug:
+        var: target_CHG
