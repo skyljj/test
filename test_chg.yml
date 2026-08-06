@@ -76,3 +76,20 @@
     - name: Output filtered target CHG list
       ansible.builtin.debug:
         var: target_CHG
+
+
+
+- name: Check if current CHG matches criteria and append to target
+      ansible.builtin.set_fact:
+        target_CHGs: "{{ target_CHGs + [item] }}"
+      vars:
+        # 获取当前 Ticket 接口返回的 issue 数据对象
+        # 优先使用 .values()[0] 避免 key 匹配陷阱
+        issue_data: "{{ (single_chg_res.json.issues.values() | list)[0] if (single_chg_res.json is defined and single_chg_res.json.issues is defined and (single_chg_res.json.issues | length > 0)) else {} }}"
+        
+        t_type: "{{ issue_data.issue_type | default('') }}"
+        raw_services: "{{ issue_data.affected_service | default([]) }}"
+        services_lower: "{{ raw_services | map('lower') | list }}"
+      when:
+        - (t_type | lower == 'standard chg')
+        - ('linux' in services_lower)
