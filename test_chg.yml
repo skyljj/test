@@ -37,6 +37,17 @@
       register: chg_query_results
       when: chg_candidates | length > 0
 
+- name: Debug - Inspect extracted fields
+      ansible.builtin.debug:
+        msg:
+          - "Ticket ID: {{ item.item }}"
+          - "Raw Issue Data: {{ item.json.issues[item.item] if (item.json is defined and item.json.issues is defined and item.item in item.json.issues) else 'NOT_FOUND' }}"
+          - "Issue Type: '{{ item.json.issues[item.item].issue_type | default('N/A') }}'"
+          - "Affected Service: {{ item.json.issues[item.item].affected_service | default('N/A') }}"
+          - "Affected Service Type: {{ item.json.issues[item.item].affected_service | type_debug if (item.json is defined and item.json.issues is defined and item.item in item.json.issues) else 'N/A' }}"
+      loop: "{{ chg_query_results.results }}"
+      when: chg_query_results.results is defined
+
 - name: Filter target_CHG with type 'standard CHG' and system 'Linux'
       ansible.builtin.set_fact:
         target_CHG: >-
