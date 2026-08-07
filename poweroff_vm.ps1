@@ -1,8 +1,19 @@
-# PowerShell Script: Power off VMs in multiple vCenters and rename
-# Function: Connect to 10 vCenters, power off 10 VMs in each vCenter and rename to vm-name_deco
+# PowerShell Script: Power off / rename / delete defined VMs across vCenters
+# Actions:
+#   deco   (default) - power off, rename to vm-name_deco, disconnect NICs
+#   delete           - delete previously renamed vm-name_deco VMs (requires confirmation)
+#
+# Usage:
+#   .\poweroff_vm_defined.ps1
+#   .\poweroff_vm_defined.ps1 deco
+#   .\poweroff_vm_defined.ps1 delete
 
 param(
-    [Parameter(Mandatory=$false)]
+    [Parameter(Position = 0, Mandatory = $false)]
+    [ValidateSet("deco", "delete")]
+    [string]$Action = "deco",
+
+    [Parameter(Mandatory = $false)]
     [string]$LogFile = "vm_poweroff_log.txt"
 )
 
@@ -92,8 +103,16 @@ function PowerOffAndRenameVM {
         # Rename VM
         $newName = "$($vm.Name)_deco"
         Write-Log "Renaming VM: $($vm.Name) -> $newName"
-        Set-VM -VM $vm -Name $newName -Confirm:$false -ErrorAction Stop
-        Write-Log "VM renamed successfully: $($vm.Name) -> $newName" "SUCCESS"
+        $vm = Set-VM -VM $vm -Name $newName -Confirm:$false -ErrorAction Stop
+        Write-Log "VM renamed successfully: $($vm.Name)" "SUCCESS"
+
+        # Disconnect all network adapters
+        $nics = Get-NetworkAdapter -VM $vm -ErrorAction Stop
+        Write-Log "Disconnecting $($nics.Count) network adapter(s) on VM: $($vm.Name)"
+        foreach ($nic in $nics) {
+            Set-NetworkAdapter -NetworkAdapter $nic -Connected:$false -StartConnected:$false -Confirm:$false -ErrorAction Stop
+            Write-Log "Disconnected network adapter: $($nic.Name) (Network: $($nic.NetworkName))" "SUCCESS"
+        }
         
         return $true
     } catch {
@@ -102,11 +121,52 @@ function PowerOffAndRenameVM {
     }
 }
 
+# 删除已 rename 的 _deco 虚拟机
+function DeleteDecoVM {
+    param(
+        [string]$vCenterName,
+        [object]$vm
+    )
+
+    try {
+        if ($vm.PowerState -ne "PoweredOff") {
+            Write-Log "VM $($vm.Name) in $vCenterName is $($vm.PowerState), skip delete (only delete powered-off VMs)" "WARNING"
+            return $false
+        }
+
+        Write-Log "Deleting VM: $($vm.Name) in $vCenterName"
+        Remove-VM -VM $vm -DeletePermanently -Confirm:$false -ErrorAction Stop
+        Write-Log "VM $($vm.Name) has been successfully deleted" "SUCCESS"
+        return $true
+    } catch {
+        Write-Log "Error deleting VM $($vm.Name): $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
 # 主执行逻辑
 function Main {
-    Write-Log "Starting VM power off and rename task"
+    Write-Log "Starting task with Action=$Action"
     Write-Log "Log file: $LogFile"
-    
+
+    if ($Action -eq "delete") {
+        Write-Log "WARNING: This will permanently delete renamed *_deco VMs from the map!" "WARNING"
+        Write-Host ""
+        Write-Host "Planned delete targets (original name -> deco name):" -ForegroundColor Yellow
+        foreach ($vcName in ($vmsToDecoMap.Keys | Sort-Object)) {
+            foreach ($vmName in $vmsToDecoMap[$vcName]) {
+                Write-Host "  [$vcName] $vmName -> ${vmName}_deco"
+            }
+        }
+        Write-Host ""
+        $confirmation = Read-Host "Confirm deletion of these *_deco VMs? (Type 'YES' to confirm)"
+        if ($confirmation -ne "YES") {
+            Write-Log "Delete operation cancelled by user" "INFO"
+            return
+        }
+        Write-Log "Delete confirmed by user" "WARNING"
+    }
+
     $totalProcessed = 0
     $totalSuccess = 0
     $totalFailed = 0
@@ -114,74 +174,72 @@ function Main {
     $notFoundList = @()
     $failedList = @()
     $totalToProcess = 0
-    
+
     foreach ($vCenter in $vCenters) {
-        # 检查是否配置了需要处理的虚拟机
         if (-not $vmsToDecoMap.ContainsKey($vCenter.Name)) {
-            Write-Log "No VMs configured for deco in $($vCenter.Name), skipping this vCenter" "INFO"
+            Write-Log "No VMs configured for $Action in $($vCenter.Name), skipping this vCenter" "INFO"
             continue
         }
-        
+
         Write-Log "Processing vCenter: $($vCenter.Name)"
-        
-        # 连接到vCenter
+
         $connection = Connect-ToVCenter -vCenter $vCenter
         if (-not $connection) {
             Write-Log "Skipping vCenter: $($vCenter.Name) - Connection failed" "WARNING"
             continue
         }
-        
+
         try {
-            # Get list of VMs that need deco
-            Write-Log "Getting list of VMs that need deco in $($vCenter.Name)..."
             $vmNames = $vmsToDecoMap[$vCenter.Name]
             $totalToProcess += $vmNames.Count
-            
+
             $vms = @()
             foreach ($vmName in $vmNames) {
-                $vmObj = Get-VM -Name $vmName -ErrorAction SilentlyContinue
+                $lookupName = if ($Action -eq "delete") { "${vmName}_deco" } else { $vmName }
+                $vmObj = Get-VM -Name $lookupName -ErrorAction SilentlyContinue
                 if ($vmObj) {
                     $vms += $vmObj
                 } else {
                     $totalNotFound++
-                    $notFoundInfo = @{
+                    $notFoundList += @{
                         vCenter = $vCenter.Name
-                        VMName = $vmName
+                        VMName = $lookupName
                     }
-                    $notFoundList += $notFoundInfo
-                    Write-Log "VM not found: $vmName in $($vCenter.Name)" "WARNING"
+                    Write-Log "VM not found: $lookupName in $($vCenter.Name)" "WARNING"
                 }
             }
-            
+
             if ($vms.Count -eq 0) {
                 Write-Log "No VMs found in $($vCenter.Name)" "WARNING"
                 continue
             }
-            
+
             Write-Log "Found $($vms.Count) VMs in $($vCenter.Name)"
-            
-            # Process each VM
+
             foreach ($vm in $vms) {
                 $totalProcessed++
                 Write-Log "Processing VM: $($vm.Name) (#$totalProcessed)"
-                
-                $result = PowerOffAndRenameVM -vCenterName $vCenter.Name -vm $vm
+
+                if ($Action -eq "delete") {
+                    $result = DeleteDecoVM -vCenterName $vCenter.Name -vm $vm
+                } else {
+                    $result = PowerOffAndRenameVM -vCenterName $vCenter.Name -vm $vm
+                }
+
                 if ($result) {
                     $totalSuccess++
                 } else {
                     $totalFailed++
-                    $failedInfo = @{
+                    $failedList += @{
                         vCenter = $vCenter.Name
                         VMName = $vm.Name
                     }
-                    $failedList += $failedInfo
                 }
             }
-            
+
         } catch {
             Write-Log "Error processing vCenter $($vCenter.Name): $($_.Exception.Message)" "ERROR"
         } finally {
-            # Disconnect
             try {
                 Disconnect-VIServer -Server $connection -Confirm:$false -ErrorAction SilentlyContinue
                 Write-Log "Disconnected from $($vCenter.Name)"
@@ -190,11 +248,10 @@ function Main {
             }
         }
     }
-    
-    # Output summary
+
     Write-Log ""
     Write-Log "=================================================================" "INFO"
-    Write-Log "Task Completion Summary" "INFO"
+    Write-Log "Task Completion Summary (Action=$Action)" "INFO"
     Write-Log "=================================================================" "INFO"
     Write-Log "Total VMs to process: $totalToProcess"
     Write-Log "Total VMs not found: $totalNotFound"
@@ -202,8 +259,7 @@ function Main {
     Write-Log "Successfully processed: $totalSuccess"
     Write-Log "Failed: $totalFailed"
     Write-Log ""
-    
-    # Output not found VM list
+
     if ($notFoundList.Count -gt 0) {
         Write-Log "VMs Not Found List:" "WARNING"
         Write-Log "=================================================================" "INFO"
@@ -212,8 +268,7 @@ function Main {
         }
         Write-Log ""
     }
-    
-    # Output failed VM list
+
     if ($failedList.Count -gt 0) {
         Write-Log "Failed VMs List:" "ERROR"
         Write-Log "=================================================================" "INFO"
@@ -222,7 +277,7 @@ function Main {
         }
         Write-Log ""
     }
-    
+
     Write-Log "=================================================================" "INFO"
     Write-Log "Detailed log available at: $LogFile" "INFO"
     Write-Log "=================================================================" "INFO"
