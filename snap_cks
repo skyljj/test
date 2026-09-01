@@ -1,0 +1,253 @@
+---
+- name: Discover, Validate, Snapshot and Power On vCenter VMs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # vCenter 连接配置
+    vcenter_hostname: "{{ lookup('env', 'VMWARE_HOST') }}"
+    vcenter_username: "{{ lookup('env', 'VMWARE_USER') }}"
+    vcenter_password: "{{ lookup('env', 'VMWARE_PASSWORD') }}"
+    vcenter_validate_certs: false
+
+    # 输入待处理的虚拟机名称列表
+    input_vm_names:
+      - "prod-db-01"
+      - "prod-app-01"
+      - "prod-app-02"
+
+    # 快照配置
+    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d%H%M%S') }}"
+    target_snapshot_name: "cold-snap-{{ snapshot_timestamp }}"
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # 阶段 1：使用 vmware_guest_find 发现 VM 并获取所属 datacenter
+    # -------------------------------------------------------------------------
+    - name: Locate VMs and find their datacenters
+      community.vmware.vmware_guest_find:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+        name: "{{ item }}"
+      loop: "{{ input_vm_names }}"
+      register: find_results
+
+    - name: Fail if any VM is not found in vCenter
+      ansible.builtin.assert:
+        that:
+          - item.folders is defined
+          - item.folders | length > 0
+        fail_msg: "VM '{{ item.item }}' was not found in vCenter!"
+        success_msg: "Found VM: '{{ item.item }}'"
+      loop: "{{ find_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # 提取并组装包含 name 和 datacenter 的结构化清单
+    # vmware_guest_find 返回格式为: "/<datacenter_name>/vm/..."
+    - name: Build detailed VM list with datacenter info
+      ansible.builtin.set_fact:
+        discovered_vms: >-
+          {{
+            discovered_vms | default([]) + [{
+              'name': item.item,
+              'datacenter': item.folders[0].split('/')[1]
+            }]
+          }}
+      loop: "{{ find_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # -------------------------------------------------------------------------
+    # 阶段 2：获取电源状态并进行前置条件检查（必须全为 poweredOff）
+    # -------------------------------------------------------------------------
+    - name: Query power state for each VM
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+        datacenter: "{{ item.datacenter }}"
+        name: "{{ item.name }}"
+        schema: "vsphere"
+        properties:
+          - "runtime.powerState"
+      loop: "{{ discovered_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: vm_info_results
+
+    - name: Extract power states of all VMs
+      ansible.builtin.set_fact:
+        vm_power_states: "{{ vm_info_results.results | map(attribute='instance.runtime.powerState') | list }}"
+
+    - name: Ensure ALL VMs are in poweredOff state
+      ansible.builtin.assert:
+        that:
+          - "vm_power_states | unique == ['poweredOff']"
+        fail_msg: "Pre-check failed! Not all VMs are powered off. Current states: {{ vm_power_states }}"
+        success_msg: "Pre-check passed: All target VMs are confirmed powered off."
+
+    # -------------------------------------------------------------------------
+    # 阶段 3：批量并发打冷快照（Async 提交，保证时间点一致）
+    # -------------------------------------------------------------------------
+    - name: Batch trigger snapshot creation for all VMs (Async)
+      community.vmware.vmware_guest_snapshot:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+        datacenter: "{{ item.datacenter }}"
+        name: "{{ item.name }}"
+        state: present
+        snapshot_name: "{{ target_snapshot_name }}"
+        description: "Pre-boot cold snapshot created via Ansible"
+        memory_dump: false
+        quiesce: false  # 关机状态下不需要且不支持 quiesce
+      loop: "{{ discovered_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      async: 3600
+      poll: 0
+      register: snap_jobs
+
+    - name: Wait for all snapshot jobs to finish
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ snap_jobs.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      register: snap_results
+      until: snap_results.finished
+      retries: 60
+      delay: 5
+
+    # -------------------------------------------------------------------------
+    # 阶段 4：快照全部完成后，批量并发开机
+    # -------------------------------------------------------------------------
+    - name: Batch power on all VMs (Async)
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ vcenter_validate_certs }}"
+        name: "{{ item.name }}"
+        state: powered-on
+      loop: "{{ discovered_vms }}"
+      loop_control:
+        label: "{{ item.name }}"
+      async: 300
+      poll: 0
+      register: poweron_jobs
+
+    - name: Wait for all VMs to reach poweredOn state
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ poweron_jobs.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      register: poweron_results
+      until: poweron_results.finished
+      retries: 30
+      delay: 5
+
+    - name: Confirm all operations succeeded
+      ansible.builtin.debug:
+        msg: "Successfully created snapshot '{{ target_snapshot_name }}' and powered on all VMs."
+
+
+
+
+
+---
+# 阶段 1：批量异步关机
+- name: Batch power off all VMs (Async)
+  community.vmware.vmware_guest_powerstate:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ vcenter_validate_certs }}"
+    name: "{{ item.name }}"
+    folder: "{{ item.folder | default(omit) }}"
+    state: powered-off
+  loop: "{{ vm_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  async: 600
+  poll: 0
+  register: poweroff_jobs
+
+# 阶段 2：等待所有 VM 完全关机
+- name: Wait for all VMs to power off
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ poweroff_jobs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: poweroff_results
+  until: poweroff_results.finished
+  retries: 40
+  delay: 5
+
+# 阶段 3：批量异步回滚指定快照
+- name: Batch revert snapshots for all VMs (Async)
+  community.vmware.vmware_guest_snapshot:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ vcenter_validate_certs }}"
+    datacenter: "{{ item.datacenter | default(omit) }}"
+    name: "{{ item.name }}"
+    folder: "{{ item.folder | default(omit) }}"
+    state: revert
+    snapshot_name: "{{ item.snapshot_name | default(target_snapshot_name) }}"
+  loop: "{{ vm_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  async: 1800
+  poll: 0
+  register: revert_jobs
+
+# 阶段 4：等待所有 VM 回滚完成
+- name: Wait for all reverts to finish
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ revert_jobs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: revert_results
+  until: revert_results.finished
+  retries: 60
+  delay: 5
+
+# 阶段 5：批量重新开机
+- name: Batch power on all VMs after revert (Async)
+  community.vmware.vmware_guest_powerstate:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ vcenter_validate_certs }}"
+    name: "{{ item.name }}"
+    folder: "{{ item.folder | default(omit) }}"
+    state: powered-on
+  loop: "{{ vm_list }}"
+  loop_control:
+    label: "{{ item.name }}"
+  async: 300
+  poll: 0
+  register: poweron_jobs
+
+# 阶段 6：等待全部开机
+- name: Wait for all VMs to power on
+  ansible.builtin.async_status:
+    jid: "{{ item.ansible_job_id }}"
+  loop: "{{ poweron_jobs.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"
+  register: poweron_results
+  until: poweron_results.finished
+  retries: 30
+  delay: 5
