@@ -1,0 +1,40 @@
+---
+- name: Get ESXi LACP Status Flat List via Jinja2
+  hosts: esxi_hosts
+  gather_facts: no
+
+  tasks:
+    - name: Fetch raw LACP status from ESXi
+      ansible.builtin.raw: esxcli network vswitch dvs vmware lacp status get
+      register: lacp_raw
+      changed_when: false
+
+    - name: Parse LACP status into flat list with Jinja2
+      ansible.builtin.set_fact:
+        lacp_flat_list: >-
+          [
+          {% set flat_items = [] %}
+          {% for block in lacp_raw.stdout.split('DVS name: ')[1:] %}
+            {% set dvs = block.splitlines()[0] | trim %}
+            {% for nic, state in block | regex_findall('(?i)(vmnic\d+)[\s\S]*?state:\s*([A-Za-z]+)') %}
+              {{ flat_items.append([dvs, nic, state]) }}
+            {% endfor %}
+          {% endfor %}
+          {% for item in flat_items %}
+            {{ item | to_json }}{{ '' if loop.last else ',' }}
+          {% endfor %}
+          ]
+
+    - name: Display LACP flat list
+      ansible.builtin.debug:
+        var: lacp_flat_list
+
+    - name: Assert all NICs are Bundled
+      vars:
+        unbundled: "{{ lacp_flat_list | rejectattr('2', 'equalto', 'Bundled') | list }}"
+      ansible.builtin.assert:
+        that:
+          - lacp_flat_list | length > 0
+          - unbundled | length == 0
+        fail_msg: "存在未聚合网卡: {{ unbundled }}"
+        success_msg: "所有 DVS 网卡均已处于 Bundled 状态。"
