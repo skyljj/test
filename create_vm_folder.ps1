@@ -7,6 +7,9 @@
 #   Linux_*   -> vsphere.local\COD_Linux_PowerUsers   role COD_VMPowerUser
 #   Windows_* -> vsphere.local\COD_Windows_PowerUsers role COD_VMPowerUser
 #   OVA_*     -> no extra permission
+#   If the group permission is already on the folder, skip.
+#
+# Also set ESXi Advanced Setting Syslog.global.logHost for all hosts in the datacenter.
 #
 # Usage:
 #   .\create_vm_folder.ps1 -VCenterName vCenter1 -DatacenterName DC1
@@ -58,6 +61,10 @@ $permissionMap = @{
     "Windows" = "vsphere.local\COD_Windows_PowerUsers"
 }
 $roleName = "COD_VMPowerUser"
+
+# ESXi syslog.global.logHost, e.g. udp://syslog.company.com:514  or  tcp://syslog.company.com:514
+$syslogLogHost = "udp://syslog.company.com:514"
+$syslogSettingName = "Syslog.global.logHost"
 
 # 日志函数
 function Write-Log {
@@ -129,10 +136,10 @@ function New-VmFolderWithPermission {
 
         $principal = $permissionMap[$osType]
         $existingPerm = Get-VIPermission -Entity $folder -ErrorAction SilentlyContinue |
-            Where-Object { $_.Principal -eq $principal -and $_.Role -eq $roleName }
+            Where-Object { $_.Principal -ieq $principal }
 
         if ($existingPerm) {
-            Write-Log "Permission already exists on $FolderName for $principal ($roleName), skip" "WARNING"
+            Write-Log "Group already present on $FolderName ($principal), skip permission" "WARNING"
             return $true
         }
 
@@ -144,6 +151,41 @@ function New-VmFolderWithPermission {
         Write-Log "Error processing folder $FolderName : $($_.Exception.Message)" "ERROR"
         return $false
     }
+}
+
+function Set-EsxiSyslogLogHost {
+    param(
+        [object]$Datacenter
+    )
+
+    $ok = 0
+    $fail = 0
+    $skip = 0
+
+    $hosts = @(Get-VMHost -Location $Datacenter -ErrorAction Stop | Sort-Object Name)
+    Write-Log "Found $($hosts.Count) ESXi hosts in datacenter $($Datacenter.Name)"
+
+    foreach ($esxi in $hosts) {
+        try {
+            $setting = Get-AdvancedSetting -Entity $esxi -Name $syslogSettingName -ErrorAction Stop
+            $current = [string]$setting.Value
+            if ($current -eq $syslogLogHost) {
+                Write-Log "Syslog already set on $($esxi.Name): $current, skip" "WARNING"
+                $skip++
+                continue
+            }
+
+            Write-Log "Setting $syslogSettingName on $($esxi.Name): '$current' -> '$syslogLogHost'"
+            Set-AdvancedSetting -AdvancedSetting $setting -Value $syslogLogHost -Confirm:$false -ErrorAction Stop | Out-Null
+            Write-Log "Set $syslogSettingName on $($esxi.Name)" "SUCCESS"
+            $ok++
+        } catch {
+            Write-Log "Error setting syslog on $($esxi.Name): $($_.Exception.Message)" "ERROR"
+            $fail++
+        }
+    }
+
+    return @{ Success = $ok; Failed = $fail; Skipped = $skip; Total = $hosts.Count }
 }
 
 function Main {
@@ -171,7 +213,9 @@ function Main {
         }
     }
     Write-Host ""
-    $confirmation = Read-Host "Confirm create these folders and grant permissions? (Type 'YES' to confirm)"
+    Write-Host "ESXi syslog.global.logHost: $syslogLogHost" -ForegroundColor Yellow
+    Write-Host ""
+    $confirmation = Read-Host "Confirm create folders, grant permissions, and set ESXi syslog? (Type 'YES' to confirm)"
     if ($confirmation -ne "YES") {
         Write-Log "Operation cancelled by user" "INFO"
         return
@@ -185,6 +229,7 @@ function Main {
 
     $totalSuccess = 0
     $totalFailed = 0
+    $syslogResult = @{ Success = 0; Failed = 0; Skipped = 0; Total = 0 }
 
     try {
         $datacenter = Get-Datacenter -Name $DatacenterName -ErrorAction Stop
@@ -207,6 +252,9 @@ function Main {
                 $totalFailed++
             }
         }
+
+        Write-Log "Configuring $syslogSettingName on all ESXi hosts in $($datacenter.Name)"
+        $syslogResult = Set-EsxiSyslogLogHost -Datacenter $datacenter
     } catch {
         Write-Log "Error processing datacenter $DatacenterName : $($_.Exception.Message)" "ERROR"
     } finally {
@@ -227,6 +275,10 @@ function Main {
     Write-Log "Folders planned: $($folderNames.Count)"
     Write-Log "Successfully processed: $totalSuccess"
     Write-Log "Failed: $totalFailed"
+    Write-Log "ESXi syslog hosts: $($syslogResult.Total)"
+    Write-Log "ESXi syslog set: $($syslogResult.Success)"
+    Write-Log "ESXi syslog skipped (already set): $($syslogResult.Skipped)"
+    Write-Log "ESXi syslog failed: $($syslogResult.Failed)"
     Write-Log "=================================================================" "INFO"
     Write-Log "Detailed log available at: $LogFile" "INFO"
     Write-Log "=================================================================" "INFO"
