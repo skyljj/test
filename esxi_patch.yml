@@ -1,0 +1,246 @@
+---
+# vCenter (maintenance mode / optional SSH service)
+vcenter_hostname: ""
+vcenter_username: ""
+vcenter_password: ""
+validate_certs: false
+
+# Artifactory
+artifactory_user: ""
+artifactory_password: ""
+artifactory_validate_certs: false
+
+# Patch zip/offline bundle (required)
+# Full URL, e.g. https://artifactory.example.com/artifactory/esxi/ESXi-8.0U3-xxxxx.zip
+esxi_patch_url: ""
+esxi_patch_package: "{{ esxi_patch_url | basename }}"
+
+# Optional extra VIBs. Empty = skip.
+# Each item: filename, and optional url (defaults to artifactory dir of the patch zip)
+# esxi_vibs:
+#   - filename: nenic-xxx.vib
+#     url: https://artifactory.example.com/artifactory/esxi/vibs/nenic-xxx.vib
+esxi_vibs: []
+
+esxi_iso_folder: "ISO"
+esxi_datastore_match: "vsan"
+
+# Patch flags
+esxi_patch_no_sig_check: false
+esxi_patch_reboot: true
+esxi_patch_reboot_timeout: 900
+esxi_maintenance_evacuate: true
+esxi_maintenance_timeout: 3600
+esxi_enable_ssh: true
+esxi_disable_ssh_after: true
+
+
+
+
+---
+- name: Validate required patch variables
+  ansible.builtin.fail:
+    msg: "esxi_patch_url or esxi_patch_package is required"
+  when:
+    - esxi_patch_url | default('') | length == 0
+    - esxi_patch_package | default('') | length == 0
+  run_once: true
+
+- name: Enable SSH on ESXi
+  community.vmware.vmware_host_service_manager:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs }}"
+    esxi_hostname: "{{ inventory_hostname }}"
+    service_name: TSM-SSH
+    state: present
+  delegate_to: localhost
+  when:
+    - esxi_enable_ssh | bool
+    - vcenter_hostname | default('') | length > 0
+
+- name: Prepare patch and VIBs on vSAN ISO folder
+  ansible.builtin.include_tasks: prepare_packages.yml
+  run_once: true
+  when: esxi_patch_prepare | default(true) | bool
+
+- name: Share prepared package paths to this host
+  ansible.builtin.include_tasks: share_package_facts.yml
+  when:
+    - esxi_patch_apply | default(true) | bool
+    - inventory_hostname != ansible_play_hosts_all[0]
+
+- name: Patch this ESXi host
+  ansible.builtin.include_tasks: patch_host.yml
+  when: esxi_patch_apply | default(true) | bool
+
+- name: Disable SSH on ESXi
+  community.vmware.vmware_host_service_manager:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs }}"
+    esxi_hostname: "{{ inventory_hostname }}"
+    service_name: TSM-SSH
+    state: absent
+  delegate_to: localhost
+  when:
+    - esxi_disable_ssh_after | bool
+    - vcenter_hostname | default('') | length > 0
+    - esxi_patch_apply | default(true) | bool
+
+
+
+
+---
+# run_once on one cluster host: find vSAN datastore, ISO folder, patch/vibs.
+# Shared vSAN means one download is enough for the whole cluster.
+
+- name: List ESXi filesystems
+  ansible.builtin.command: esxcli --formatter=csv storage filesystem list
+  register: esxi_fs_csv
+  changed_when: false
+
+- name: Fail if no filesystem list
+  ansible.builtin.fail:
+    msg: "Failed to list filesystems on {{ inventory_hostname }}"
+  when: esxi_fs_csv.stdout_lines | default([]) | length < 2
+
+- name: Find datastore whose name/type contains vsan
+  ansible.builtin.set_fact:
+    esxi_vsan_row: "{{ esxi_fs_csv.stdout_lines[1:] | select('search', esxi_datastore_match, ignorecase=true) | list | first | default('') }}"
+
+- name: Fail if no vSAN datastore
+  ansible.builtin.fail:
+    msg: >-
+      No datastore matching '{{ esxi_datastore_match }}' on {{ inventory_hostname }}.
+      Filesystems: {{ esxi_fs_csv.stdout_lines }}
+  when: esxi_vsan_row | length == 0
+
+- name: Parse vSAN mount point and volume name
+  ansible.builtin.set_fact:
+    esxi_vsan_mount: "{{ esxi_vsan_row.split(',')[0] | regex_replace('^\"|\"$', '') }}"
+    esxi_vsan_name: "{{ esxi_vsan_row.split(',')[1] | regex_replace('^\"|\"$', '') }}"
+
+- name: Set ISO directory and patch path
+  ansible.builtin.set_fact:
+    esxi_iso_dir: "{{ esxi_vsan_mount }}/{{ esxi_iso_folder }}"
+    esxi_patch_path: "{{ esxi_vsan_mount }}/{{ esxi_iso_folder }}/{{ esxi_patch_package }}"
+
+- name: Log vSAN ISO location
+  ansible.builtin.debug:
+    msg: "vSAN datastore={{ esxi_vsan_name }} mount={{ esxi_vsan_mount }} iso={{ esxi_iso_dir }} patch={{ esxi_patch_path }}"
+
+- name: Ensure ISO folder exists on vSAN datastore
+  ansible.builtin.file:
+    path: "{{ esxi_iso_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Check if patch package already exists
+  ansible.builtin.stat:
+    path: "{{ esxi_patch_path }}"
+  register: esxi_patch_stat
+
+- name: Fail if patch URL missing and package not on datastore
+  ansible.builtin.fail:
+    msg: "Patch not found at {{ esxi_patch_path }} and esxi_patch_url is empty"
+  when:
+    - not esxi_patch_stat.stat.exists
+    - esxi_patch_url | default('') | length == 0
+
+- name: Download patch from Artifactory to controller
+  ansible.builtin.get_url:
+    url: "{{ esxi_patch_url }}"
+    dest: "/tmp/{{ esxi_patch_package }}"
+    url_username: "{{ artifactory_user | default(omit) }}"
+    url_password: "{{ artifactory_password | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: "{{ artifactory_validate_certs }}"
+    mode: "0644"
+  delegate_to: localhost
+  when: not esxi_patch_stat.stat.exists
+
+- name: Copy patch package to vSAN ISO folder
+  ansible.builtin.copy:
+    src: "/tmp/{{ esxi_patch_package }}"
+    dest: "{{ esxi_patch_path }}"
+    mode: "0644"
+  when: not esxi_patch_stat.stat.exists
+
+- name: Initialize VIB path list
+  ansible.builtin.set_fact:
+    esxi_vib_paths: []
+
+- name: Skip VIB download when esxi_vibs is not defined or empty
+  ansible.builtin.debug:
+    msg: "esxi_vibs is not defined or empty, skip VIB download"
+  when: esxi_vibs | default([]) | length == 0
+
+- name: Check each VIB on ISO folder
+  ansible.builtin.stat:
+    path: "{{ esxi_iso_dir }}/{{ item.filename | default(item) }}"
+  register: esxi_vib_stats
+  loop: "{{ esxi_vibs | default([]) }}"
+  loop_control:
+    label: "{{ item.filename | default(item) }}"
+  when: esxi_vibs | default([]) | length > 0
+
+- name: Download missing VIBs from Artifactory to controller
+  ansible.builtin.get_url:
+    url: "{{ item.item.url | default(esxi_patch_url | dirname ~ '/' ~ (item.item.filename | default(item.item))) }}"
+    dest: "/tmp/{{ item.item.filename | default(item.item) }}"
+    url_username: "{{ artifactory_user | default(omit) }}"
+    url_password: "{{ artifactory_password | default(omit) }}"
+    force_basic_auth: true
+    validate_certs: "{{ artifactory_validate_certs }}"
+    mode: "0644"
+  delegate_to: localhost
+  loop: "{{ esxi_vib_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.filename | default(item.item) }}"
+  when:
+    - esxi_vibs | default([]) | length > 0
+    - item is not skipped
+    - not (item.stat.exists | default(false))
+
+- name: Copy missing VIBs to vSAN ISO folder
+  ansible.builtin.copy:
+    src: "/tmp/{{ item.item.filename | default(item.item) }}"
+    dest: "{{ esxi_iso_dir }}/{{ item.item.filename | default(item.item) }}"
+    mode: "0644"
+  loop: "{{ esxi_vib_stats.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.filename | default(item.item) }}"
+  when:
+    - esxi_vibs | default([]) | length > 0
+    - item is not skipped
+    - not (item.stat.exists | default(false))
+
+- name: Register VIB paths
+  ansible.builtin.set_fact:
+    esxi_vib_paths: "{{ esxi_vib_paths + [esxi_iso_dir ~ '/' ~ (item.filename | default(item))] }}"
+  loop: "{{ esxi_vibs | default([]) }}"
+  loop_control:
+    label: "{{ item.filename | default(item) }}"
+  when: esxi_vibs | default([]) | length > 0
+
+
+
+
+---
+- name: Share vSAN patch paths from the prepare host to this host
+  ansible.builtin.set_fact:
+    esxi_patch_path: "{{ hostvars[_prep_host].esxi_patch_path }}"
+    esxi_iso_dir: "{{ hostvars[_prep_host].esxi_iso_dir }}"
+    esxi_vsan_name: "{{ hostvars[_prep_host].esxi_vsan_name }}"
+    esxi_vsan_mount: "{{ hostvars[_prep_host].esxi_vsan_mount }}"
+    esxi_vib_paths: "{{ hostvars[_prep_host].esxi_vib_paths | default([]) }}"
+  vars:
+    _prep_host: "{{ ansible_play_hosts_all[0] }}"
+
+
+
+
+
