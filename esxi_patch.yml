@@ -1,43 +1,4 @@
 ---
-# vCenter (maintenance mode / optional SSH service)
-vcenter_hostname: ""
-vcenter_username: ""
-vcenter_password: ""
-validate_certs: false
-
-# Artifactory
-artifactory_user: ""
-artifactory_password: ""
-artifactory_validate_certs: false
-
-# Patch zip/offline bundle (required)
-# Full URL, e.g. https://artifactory.example.com/artifactory/esxi/ESXi-8.0U3-xxxxx.zip
-esxi_patch_url: ""
-esxi_patch_package: "{{ esxi_patch_url | basename }}"
-
-# Optional extra VIBs. Empty = skip.
-# Each item: filename, and optional url (defaults to artifactory dir of the patch zip)
-# esxi_vibs:
-#   - filename: nenic-xxx.vib
-#     url: https://artifactory.example.com/artifactory/esxi/vibs/nenic-xxx.vib
-esxi_vibs: []
-
-esxi_iso_folder: "ISO"
-esxi_datastore_match: "vsan"
-
-# Patch flags
-esxi_patch_no_sig_check: false
-esxi_patch_reboot: true
-esxi_patch_reboot_timeout: 900
-esxi_maintenance_evacuate: true
-esxi_maintenance_timeout: 3600
-esxi_enable_ssh: true
-esxi_disable_ssh_after: true
-
-
-
-
----
 - name: Validate required patch variables
   ansible.builtin.fail:
     msg: "esxi_patch_url or esxi_patch_package is required"
@@ -45,6 +6,14 @@ esxi_disable_ssh_after: true
     - esxi_patch_url | default('') | length == 0
     - esxi_patch_package | default('') | length == 0
   run_once: true
+
+- name: Resolve target cluster membership
+  ansible.builtin.include_tasks: resolve_cluster.yml
+
+- name: Skip ESXi not in target cluster
+  ansible.builtin.debug:
+    msg: "Skip {{ inventory_hostname }}, not in cluster '{{ cluster_name }}'"
+  when: not (esxi_in_target_cluster | default(false) | bool)
 
 - name: Enable SSH on ESXi
   community.vmware.vmware_host_service_manager:
@@ -57,23 +26,30 @@ esxi_disable_ssh_after: true
     state: present
   delegate_to: localhost
   when:
+    - esxi_in_target_cluster | default(false) | bool
     - esxi_enable_ssh | bool
     - vcenter_hostname | default('') | length > 0
 
-- name: Prepare patch and VIBs on vSAN ISO folder
+- name: Prepare patch and VIBs once on shared cluster datastore
   ansible.builtin.include_tasks: prepare_packages.yml
   run_once: true
-  when: esxi_patch_prepare | default(true) | bool
+  delegate_to: "{{ esxi_prepare_host }}"
+  when:
+    - esxi_patch_prepare | default(true) | bool
+    - esxi_prepare_host is defined
 
-- name: Share prepared package paths to this host
+- name: Share prepared package paths to this cluster host
   ansible.builtin.include_tasks: share_package_facts.yml
   when:
     - esxi_patch_apply | default(true) | bool
-    - inventory_hostname != ansible_play_hosts_all[0]
+    - esxi_in_target_cluster | default(false) | bool
+    - inventory_hostname != esxi_prepare_host
 
 - name: Patch this ESXi host
   ansible.builtin.include_tasks: patch_host.yml
-  when: esxi_patch_apply | default(true) | bool
+  when:
+    - esxi_patch_apply | default(true) | bool
+    - esxi_in_target_cluster | default(false) | bool
 
 - name: Disable SSH on ESXi
   community.vmware.vmware_host_service_manager:
@@ -86,16 +62,72 @@ esxi_disable_ssh_after: true
     state: absent
   delegate_to: localhost
   when:
+    - esxi_in_target_cluster | default(false) | bool
     - esxi_disable_ssh_after | bool
     - vcenter_hostname | default('') | length > 0
     - esxi_patch_apply | default(true) | bool
 
 
 
+---
+- name: Put ESXi host into maintenance mode
+  community.vmware.vmware_maintenancemode:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs }}"
+    esxi_hostname: "{{ inventory_hostname }}"
+    state: present
+    evacuate: "{{ esxi_maintenance_evacuate }}"
+    timeout: "{{ esxi_maintenance_timeout }}"
+  delegate_to: localhost
+  when:
+    - vcenter_hostname | default('') | length > 0
+
+- name: Apply server patch from datastore zip
+  ansible.builtin.command:
+    argv: "{{ ['esxcli', 'software', 'vib', 'update', '-d', esxi_patch_path] + (['--no-sig-check'] if esxi_patch_no_sig_check else []) }}"
+  register: esxi_patch_result
+  changed_when: esxi_patch_result.rc == 0
+
+- name: Show patch result
+  ansible.builtin.debug:
+    msg: "{{ esxi_patch_result.stdout_lines | default([]) }}"
+
+- name: Install extra VIBs
+  ansible.builtin.command:
+    argv: "{{ ['esxcli', 'software', 'vib', 'install', '-v', item] + (['--no-sig-check'] if esxi_patch_no_sig_check else []) }}"
+  loop: "{{ esxi_vib_paths | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  register: esxi_vib_result
+  when: esxi_vib_paths | default([]) | length > 0
+
+- name: Reboot ESXi host after patch
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ esxi_patch_reboot_timeout }}"
+    connect_timeout: 30
+    msg: "Reboot after ESXi patch"
+  when: esxi_patch_reboot | bool
+
+- name: Exit maintenance mode
+  community.vmware.vmware_maintenancemode:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs }}"
+    esxi_hostname: "{{ inventory_hostname }}"
+    state: absent
+  delegate_to: localhost
+  when:
+    - vcenter_hostname | default('') | length > 0
+
+
 
 ---
-# run_once on one cluster host: find vSAN datastore, ISO folder, patch/vibs.
-# Shared vSAN means one download is enough for the whole cluster.
+# On one cluster host: find shared datastore, ISO folder, patch/vibs.
+# vsan: volume name starts with vsan
+# powerflex: volume name contains cluster_name and ends with 01, e.g. E:<cluster_name>:x:xx01
 
 - name: List ESXi filesystems
   ansible.builtin.command: esxcli --formatter=csv storage filesystem list
@@ -107,32 +139,45 @@ esxi_disable_ssh_after: true
     msg: "Failed to list filesystems on {{ inventory_hostname }}"
   when: esxi_fs_csv.stdout_lines | default([]) | length < 2
 
-- name: Find datastore whose name/type contains vsan
+- name: Select datastore row by storage_type
   ansible.builtin.set_fact:
-    esxi_vsan_row: "{{ esxi_fs_csv.stdout_lines[1:] | select('search', esxi_datastore_match, ignorecase=true) | list | first | default('') }}"
+    esxi_ds_row: >-
+      {%- set ns = namespace(row='') -%}
+      {%- for line in esxi_fs_csv.stdout_lines[1:] -%}
+        {%- set cols = line.split(',') -%}
+        {%- if cols | length > 1 -%}
+          {%- set vol = cols[1] | regex_replace('^\"|\"$', '') -%}
+          {%- if storage_type | lower == 'vsan' and vol.lower().startswith('vsan') and ns.row == '' -%}
+            {%- set ns.row = line -%}
+          {%- elif storage_type | lower == 'powerflex' and (cluster_name in vol) and vol.endswith('01') and ns.row == '' -%}
+            {%- set ns.row = line -%}
+          {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.row }}
 
-- name: Fail if no vSAN datastore
+- name: Fail if no matching datastore
   ansible.builtin.fail:
     msg: >-
-      No datastore matching '{{ esxi_datastore_match }}' on {{ inventory_hostname }}.
-      Filesystems: {{ esxi_fs_csv.stdout_lines }}
-  when: esxi_vsan_row | length == 0
+      No datastore for storage_type={{ storage_type }} cluster_name={{ cluster_name }}
+      on {{ inventory_hostname }}. Filesystems: {{ esxi_fs_csv.stdout_lines }}
+  when: esxi_ds_row | length == 0
 
-- name: Parse vSAN mount point and volume name
+- name: Parse datastore mount point and volume name
   ansible.builtin.set_fact:
-    esxi_vsan_mount: "{{ esxi_vsan_row.split(',')[0] | regex_replace('^\"|\"$', '') }}"
-    esxi_vsan_name: "{{ esxi_vsan_row.split(',')[1] | regex_replace('^\"|\"$', '') }}"
+    esxi_ds_mount: "{{ esxi_ds_row.split(',')[0] | regex_replace('^\"|\"$', '') }}"
+    esxi_ds_name: "{{ esxi_ds_row.split(',')[1] | regex_replace('^\"|\"$', '') }}"
 
 - name: Set ISO directory and patch path
   ansible.builtin.set_fact:
-    esxi_iso_dir: "{{ esxi_vsan_mount }}/{{ esxi_iso_folder }}"
-    esxi_patch_path: "{{ esxi_vsan_mount }}/{{ esxi_iso_folder }}/{{ esxi_patch_package }}"
+    esxi_iso_dir: "{{ esxi_ds_mount }}/{{ esxi_iso_folder }}"
+    esxi_patch_path: "{{ esxi_ds_mount }}/{{ esxi_iso_folder }}/{{ esxi_patch_package }}"
 
-- name: Log vSAN ISO location
+- name: Log ISO location
   ansible.builtin.debug:
-    msg: "vSAN datastore={{ esxi_vsan_name }} mount={{ esxi_vsan_mount }} iso={{ esxi_iso_dir }} patch={{ esxi_patch_path }}"
+    msg: "datastore={{ esxi_ds_name }} mount={{ esxi_ds_mount }} iso={{ esxi_iso_dir }} patch={{ esxi_patch_path }}"
 
-- name: Ensure ISO folder exists on vSAN datastore
+- name: Ensure ISO folder exists on datastore
   ansible.builtin.file:
     path: "{{ esxi_iso_dir }}"
     state: directory
@@ -162,7 +207,7 @@ esxi_disable_ssh_after: true
   delegate_to: localhost
   when: not esxi_patch_stat.stat.exists
 
-- name: Copy patch package to vSAN ISO folder
+- name: Copy patch package to ISO folder
   ansible.builtin.copy:
     src: "/tmp/{{ esxi_patch_package }}"
     dest: "{{ esxi_patch_path }}"
@@ -205,7 +250,7 @@ esxi_disable_ssh_after: true
     - item is not skipped
     - not (item.stat.exists | default(false))
 
-- name: Copy missing VIBs to vSAN ISO folder
+- name: Copy missing VIBs to ISO folder
   ansible.builtin.copy:
     src: "/tmp/{{ item.item.filename | default(item.item) }}"
     dest: "{{ esxi_iso_dir }}/{{ item.item.filename | default(item.item) }}"
@@ -228,19 +273,92 @@ esxi_disable_ssh_after: true
 
 
 
+---
+- name: Fail if cluster_name is not set
+  ansible.builtin.fail:
+    msg: "cluster_name is required so only ESXi hosts in that cluster are patched"
+  when: cluster_name | default('') | string | trim | length == 0
+  run_once: true
+
+- name: Fail if storage_type is invalid
+  ansible.builtin.fail:
+    msg: "storage_type must be 'vsan' or 'powerflex' (got '{{ storage_type | default('') }}')"
+  when: storage_type | default('') | lower not in ['vsan', 'powerflex']
+  run_once: true
+
+- name: Gather target cluster info from vCenter
+  community.vmware.vmware_cluster_info:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs }}"
+    cluster_name: "{{ cluster_name }}"
+  register: esxi_cluster_info
+  delegate_to: localhost
+  run_once: true
+
+- name: Resolve cluster key from vCenter result
+  ansible.builtin.set_fact:
+    esxi_cluster_key: "{{ cluster_name if cluster_name in _clusters else (_clusters.keys() | list | first | default('')) }}"
+  vars:
+    _clusters: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters | default({}) }}"
+  run_once: true
+
+- name: Fail if cluster was not found
+  ansible.builtin.fail:
+    msg: "Cluster '{{ cluster_name }}' not found in vCenter {{ vcenter_hostname }}"
+  when: esxi_cluster_key | default('') | length == 0
+  run_once: true
+
+- name: Set normalized cluster host names
+  ansible.builtin.set_fact:
+    esxi_cluster_hosts_raw: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters[esxi_cluster_key].hosts | default([]) }}"
+    esxi_cluster_host_names: "{{ (hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters[esxi_cluster_key].hosts | default([])) | map('lower') | list }}"
+    esxi_cluster_host_short: "{{ (hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters[esxi_cluster_key].hosts | default([])) | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+  run_once: true
+
+- name: Copy cluster name lists to this host
+  ansible.builtin.set_fact:
+    esxi_cluster_hosts_raw: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_hosts_raw | default([]) }}"
+    esxi_cluster_host_names: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_names | default([]) }}"
+    esxi_cluster_host_short: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_short | default([]) }}"
+    esxi_cluster_key: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_key }}"
+
+- name: Mark whether this ESXi is in the target cluster
+  ansible.builtin.set_fact:
+    esxi_in_target_cluster: "{{ (inventory_hostname | lower in esxi_cluster_host_names) or (inventory_hostname.split('.')[0] | lower in esxi_cluster_host_short) }}"
+
+- name: Collect inventory hosts that belong to the cluster
+  ansible.builtin.set_fact:
+    esxi_cluster_inventory_hosts: "{{ (esxi_cluster_inventory_hosts | default([])) + [item] }}"
+  loop: "{{ ansible_play_hosts_all }}"
+  when: (item | lower in hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_names) or (item.split('.')[0] | lower in hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_short)
+  run_once: true
+
+- name: Fail if no inventory host is in cluster
+  ansible.builtin.fail:
+    msg: "No inventory host belongs to cluster '{{ cluster_name }}'. Cluster hosts: {{ esxi_cluster_hosts_raw }}"
+  when: (hostvars[ansible_play_hosts_all[0]].esxi_cluster_inventory_hosts | default([])) | length == 0
+  run_once: true
+
+- name: Set prepare host to first cluster member in inventory
+  ansible.builtin.set_fact:
+    esxi_prepare_host: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_inventory_hosts[0] }}"
+
+- name: Show cluster targeting
+  ansible.builtin.debug:
+    msg: >-
+      cluster={{ cluster_name }} storage_type={{ storage_type }}
+      in_cluster={{ esxi_in_target_cluster }} prepare_host={{ esxi_prepare_host }}
+
 
 ---
-- name: Share vSAN patch paths from the prepare host to this host
+- name: Share patch paths from the prepare host to this host
   ansible.builtin.set_fact:
     esxi_patch_path: "{{ hostvars[_prep_host].esxi_patch_path }}"
     esxi_iso_dir: "{{ hostvars[_prep_host].esxi_iso_dir }}"
-    esxi_vsan_name: "{{ hostvars[_prep_host].esxi_vsan_name }}"
-    esxi_vsan_mount: "{{ hostvars[_prep_host].esxi_vsan_mount }}"
+    esxi_ds_name: "{{ hostvars[_prep_host].esxi_ds_name }}"
+    esxi_ds_mount: "{{ hostvars[_prep_host].esxi_ds_mount }}"
     esxi_vib_paths: "{{ hostvars[_prep_host].esxi_vib_paths | default([]) }}"
   vars:
-    _prep_host: "{{ ansible_play_hosts_all[0] }}"
-
-
-
-
-
+    _prep_host: "{{ esxi_prepare_host | default(ansible_play_hosts_all[0]) }}"
