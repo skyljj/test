@@ -325,27 +325,35 @@
 - name: Resolve cluster membership on this host
   ansible.builtin.set_fact:
     esxi_cluster_key: "{{ _cluster_key }}"
-    esxi_cluster_hosts_raw: "{{ _hosts_raw }}"
-    esxi_cluster_host_names: "{{ _hosts_raw | map('lower') | list }}"
-    esxi_cluster_host_short: "{{ _hosts_raw | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
     esxi_cluster_inventory_hosts: "{{ _inv_hosts }}"
     esxi_prepare_host: "{{ _inv_hosts[0] | default('') }}"
-    esxi_in_target_cluster: "{{ (inventory_hostname | lower in (_hosts_raw | map('lower') | list)) or (inventory_hostname.split('.')[0] | lower in (_hosts_raw | map('regex_replace', '\\..*$', '') | map('lower') | list)) }}"
+    esxi_in_target_cluster: "{{ inventory_hostname in _inv_hosts }}"
   vars:
     _anchor: "{{ ansible_play_hosts_all[0] }}"
     _clusters: "{{ hostvars[_anchor].esxi_cluster_info.clusters | default({}) }}"
     _cluster_key: "{{ cluster_name if cluster_name in _clusters else (_clusters.keys() | list | first | default('')) }}"
     _hosts_raw: "{{ _clusters[_cluster_key].hosts | default([]) if _cluster_key else [] }}"
-    _inv_hosts: >-
-      {%- set ns = namespace(hosts=[]) -%}
-      {%- set names = _hosts_raw | map('lower') | list -%}
-      {%- set shorts = _hosts_raw | map('regex_replace', '\..*$', '') | map('lower') | list -%}
-      {%- for h in ansible_play_hosts_all -%}
-        {%- if (h | lower in names) or (h.split('.')[0] | lower in shorts) -%}
-          {%- set ns.hosts = ns.hosts + [h] -%}
+    _host_names: >-
+      {%- set ns = namespace(names=[]) -%}
+      {%- for h in _hosts_raw -%}
+        {%- set n = (h.name if h is mapping else h) | string | trim -%}
+        {%- if n -%}
+          {%- set ns.names = ns.names + [n | lower] -%}
         {%- endif -%}
       {%- endfor -%}
-      {{ ns.hosts }}
+      {{ ns.names }}
+    _inv_hosts: >-
+      {%- set ns = namespace(hosts=[]) -%}
+      {%- for h in ansible_play_hosts_all -%}
+        {%- set inv = h | lower -%}
+        {%- set inv_short = h.split('.')[0] | lower -%}
+        {%- for n in _host_names -%}
+          {%- if inv == n or inv_short == n or inv == (n.split('.')[0]) or inv_short == (n.split('.')[0]) -%}
+            {%- set ns.hosts = ns.hosts + [h] -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ ns.hosts | unique | list }}
 
 - name: Fail if cluster was not found
   ansible.builtin.fail:
