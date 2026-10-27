@@ -129,44 +129,50 @@
 # vsan: volume name starts with vsan
 # powerflex: volume name contains cluster_name and ends with 01, e.g. E:<cluster_name>:x:xx01
 
-- name: List ESXi filesystems
-  ansible.builtin.command: esxcli --formatter=csv storage filesystem list
-  register: esxi_fs_csv
+- name: List datastore display names under /vmfs/volumes
+  ansible.builtin.command: ls -1 /vmfs/volumes
+  register: esxi_volume_listing
   changed_when: false
 
-- name: Fail if no filesystem list
+- name: Fail if volume listing is empty
   ansible.builtin.fail:
-    msg: "Failed to list filesystems on {{ inventory_hostname }}"
-  when: esxi_fs_csv.stdout_lines | default([]) | length < 2
+    msg: "Failed to list /vmfs/volumes on {{ inventory_hostname }}"
+  when: esxi_volume_listing.stdout_lines | default([]) | length == 0
 
-- name: Select datastore row by storage_type
+- name: Select matching datastore names (skip UUID folders)
   ansible.builtin.set_fact:
-    esxi_ds_row: >-
-      {%- set ns = namespace(row='') -%}
-      {%- for line in esxi_fs_csv.stdout_lines[1:] -%}
-        {%- set cols = line.split(',') -%}
-        {%- if cols | length > 1 -%}
-          {%- set vol = cols[1] | regex_replace('^\"|\"$', '') -%}
-          {%- if storage_type | lower == 'vsan' and vol.lower().startswith('vsan') and ns.row == '' -%}
-            {%- set ns.row = line -%}
-          {%- elif storage_type | lower == 'powerflex' and (cluster_name in vol) and vol.endswith('01') and ns.row == '' -%}
-            {%- set ns.row = line -%}
+    esxi_ds_names: >-
+      {%- set ns = namespace(names=[]) -%}
+      {%- for name in esxi_volume_listing.stdout_lines -%}
+        {%- set vol = name | trim -%}
+        {%- set is_uuid = vol is match('(?i)^[0-9a-f]{8}-[0-9a-f]{4,8}-[0-9a-f]{4}-[0-9a-f]{4,12}$') or vol is match('(?i)^[0-9a-f]{32}$') -%}
+        {%- if vol and not is_uuid -%}
+          {%- if storage_type | lower == 'vsan' and vol.lower().startswith('vsan') -%}
+            {%- set ns.names = ns.names + [vol] -%}
+          {%- elif storage_type | lower == 'powerflex' and (cluster_name in vol) and vol.endswith('01') -%}
+            {%- set ns.names = ns.names + [vol] -%}
           {%- endif -%}
         {%- endif -%}
       {%- endfor -%}
-      {{ ns.row }}
+      {{ ns.names }}
 
-- name: Fail if no matching datastore
+- name: Fail if no matching datastore name
   ansible.builtin.fail:
     msg: >-
-      No datastore for storage_type={{ storage_type }} cluster_name={{ cluster_name }}
-      on {{ inventory_hostname }}. Filesystems: {{ esxi_fs_csv.stdout_lines }}
-  when: esxi_ds_row | length == 0
+      No datastore name for storage_type={{ storage_type }} cluster_name={{ cluster_name }}
+      on {{ inventory_hostname }}. Volumes: {{ esxi_volume_listing.stdout_lines }}
+  when: esxi_ds_names | length == 0
 
-- name: Parse datastore mount point and volume name
+- name: Use first matching datastore name if more than one
+  ansible.builtin.debug:
+    msg: "Matched {{ esxi_ds_names | length }} datastore names, using the first one: {{ esxi_ds_names[0] }}"
+  when: esxi_ds_names | length > 1
+
+- name: Set datastore name and mount path
   ansible.builtin.set_fact:
-    esxi_ds_mount: "{{ esxi_ds_row.split(',')[0] | regex_replace('^\"|\"$', '') }}"
-    esxi_ds_name: "{{ esxi_ds_row.split(',')[1] | regex_replace('^\"|\"$', '') }}"
+    esxi_ds_name: "{{ esxi_ds_names[0] }}"
+    esxi_ds_mount: "/vmfs/volumes/{{ esxi_ds_names[0] }}"
+  when: esxi_ds_names | length > 0
 
 - name: Set ISO directory and patch path
   ansible.builtin.set_fact:
@@ -190,10 +196,10 @@
 
 - name: Fail if patch URL missing and package not on datastore
   ansible.builtin.fail:
-    msg: "Patch not found at {{ esxi_patch_path }} and esxi_patch_url is empty"
+    msg: "Patch not found at {{ esxi_patch_path }} and cannot download (af_url/esxi_patch_package empty)"
   when:
     - not esxi_patch_stat.stat.exists
-    - esxi_patch_url | default('') | length == 0
+    - (af_url | default('') | length == 0) or (esxi_patch_package | default('') | length == 0)
 
 - name: Download patch from Artifactory to controller
   ansible.builtin.get_url:
@@ -223,19 +229,29 @@
     msg: "esxi_vibs is not defined or empty, skip VIB download"
   when: esxi_vibs | default([]) | length == 0
 
-- name: Check each VIB on ISO folder
+- name: Fail if any VIB item is missing filename
+  ansible.builtin.fail:
+    msg: "esxi_vibs item is missing filename: {{ item }}"
+  loop: "{{ esxi_vibs | default([]) }}"
+  loop_control:
+    label: "{{ item.name | default(item.filename | default(item)) }}"
+  when:
+    - esxi_vibs | default([]) | length > 0
+    - item.filename | default('') | length == 0
+
+- name: Check each VIB zip on ISO folder
   ansible.builtin.stat:
-    path: "{{ esxi_iso_dir }}/{{ item.filename | default(item) }}"
+    path: "{{ esxi_iso_dir }}/{{ item.filename }}"
   register: esxi_vib_stats
   loop: "{{ esxi_vibs | default([]) }}"
   loop_control:
-    label: "{{ item.filename | default(item) }}"
+    label: "{{ item.name | default(item.filename) }}"
   when: esxi_vibs | default([]) | length > 0
 
 - name: Download missing VIBs from Artifactory to controller
   ansible.builtin.get_url:
-    url: "{{ item.item.url | default(esxi_patch_url | dirname ~ '/' ~ (item.item.filename | default(item.item))) }}"
-    dest: "/tmp/{{ item.item.filename | default(item.item) }}"
+    url: "{{ item.item.url | default((af_url | regex_replace('/$', '')) ~ '/' ~ item.item.filename) }}"
+    dest: "/tmp/{{ item.item.filename }}"
     url_username: "{{ artifactory_user | default(omit) }}"
     url_password: "{{ artifactory_password | default(omit) }}"
     force_basic_auth: true
@@ -244,7 +260,7 @@
   delegate_to: localhost
   loop: "{{ esxi_vib_stats.results | default([]) }}"
   loop_control:
-    label: "{{ item.item.filename | default(item.item) }}"
+    label: "{{ item.item.name | default(item.item.filename) }}"
   when:
     - esxi_vibs | default([]) | length > 0
     - item is not skipped
@@ -252,12 +268,12 @@
 
 - name: Copy missing VIBs to ISO folder
   ansible.builtin.copy:
-    src: "/tmp/{{ item.item.filename | default(item.item) }}"
-    dest: "{{ esxi_iso_dir }}/{{ item.item.filename | default(item.item) }}"
+    src: "/tmp/{{ item.item.filename }}"
+    dest: "{{ esxi_iso_dir }}/{{ item.item.filename }}"
     mode: "0644"
   loop: "{{ esxi_vib_stats.results | default([]) }}"
   loop_control:
-    label: "{{ item.item.filename | default(item.item) }}"
+    label: "{{ item.item.name | default(item.item.filename) }}"
   when:
     - esxi_vibs | default([]) | length > 0
     - item is not skipped
@@ -265,26 +281,33 @@
 
 - name: Register VIB paths
   ansible.builtin.set_fact:
-    esxi_vib_paths: "{{ esxi_vib_paths + [esxi_iso_dir ~ '/' ~ (item.filename | default(item))] }}"
+    esxi_vib_paths: "{{ esxi_vib_paths + [vib_item] }}"
+  vars:
+    vib_item:
+      name: "{{ item.name | default(item.filename) }}"
+      filename: "{{ item.filename }}"
+      path: "{{ esxi_iso_dir }}/{{ item.filename }}"
   loop: "{{ esxi_vibs | default([]) }}"
   loop_control:
-    label: "{{ item.filename | default(item) }}"
+    label: "{{ item.name | default(item.filename) }}"
   when: esxi_vibs | default([]) | length > 0
 
 
 
+
 ---
+# serial: 1 时 run_once 是每个 batch 一次（等于每台都跑）。
+# vCenter 查询只在 play 第一台还没有结果时执行，其它主机复用 hostvars。
+
 - name: Fail if cluster_name is not set
   ansible.builtin.fail:
     msg: "cluster_name is required so only ESXi hosts in that cluster are patched"
   when: cluster_name | default('') | string | trim | length == 0
-  run_once: true
 
 - name: Fail if storage_type is invalid
   ansible.builtin.fail:
     msg: "storage_type must be 'vsan' or 'powerflex' (got '{{ storage_type | default('') }}')"
-  when: storage_type | default('') | lower not in ['vsan', 'powerflex']
-  run_once: true
+  when: storage_type | lower not in ['vsan', 'powerflex']
 
 - name: Gather target cluster info from vCenter
   community.vmware.vmware_cluster_info:
@@ -295,61 +318,51 @@
     cluster_name: "{{ cluster_name }}"
   register: esxi_cluster_info
   delegate_to: localhost
-  run_once: true
+  when:
+    - inventory_hostname == ansible_play_hosts_all[0]
+    - hostvars[ansible_play_hosts_all[0]].esxi_cluster_info is not defined
 
-- name: Resolve cluster key from vCenter result
+- name: Resolve cluster membership on this host
   ansible.builtin.set_fact:
-    esxi_cluster_key: "{{ cluster_name if cluster_name in _clusters else (_clusters.keys() | list | first | default('')) }}"
+    esxi_cluster_key: "{{ _cluster_key }}"
+    esxi_cluster_hosts_raw: "{{ _hosts_raw }}"
+    esxi_cluster_host_names: "{{ _hosts_raw | map('lower') | list }}"
+    esxi_cluster_host_short: "{{ _hosts_raw | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
+    esxi_cluster_inventory_hosts: "{{ _inv_hosts }}"
+    esxi_prepare_host: "{{ _inv_hosts[0] | default('') }}"
+    esxi_in_target_cluster: "{{ (inventory_hostname | lower in (_hosts_raw | map('lower') | list)) or (inventory_hostname.split('.')[0] | lower in (_hosts_raw | map('regex_replace', '\\..*$', '') | map('lower') | list)) }}"
   vars:
-    _clusters: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters | default({}) }}"
-  run_once: true
+    _anchor: "{{ ansible_play_hosts_all[0] }}"
+    _clusters: "{{ hostvars[_anchor].esxi_cluster_info.clusters | default({}) }}"
+    _cluster_key: "{{ cluster_name if cluster_name in _clusters else (_clusters.keys() | list | first | default('')) }}"
+    _hosts_raw: "{{ _clusters[_cluster_key].hosts | default([]) if _cluster_key else [] }}"
+    _inv_hosts: >-
+      {%- set ns = namespace(hosts=[]) -%}
+      {%- set names = _hosts_raw | map('lower') | list -%}
+      {%- set shorts = _hosts_raw | map('regex_replace', '\..*$', '') | map('lower') | list -%}
+      {%- for h in ansible_play_hosts_all -%}
+        {%- if (h | lower in names) or (h.split('.')[0] | lower in shorts) -%}
+          {%- set ns.hosts = ns.hosts + [h] -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ ns.hosts }}
 
 - name: Fail if cluster was not found
   ansible.builtin.fail:
     msg: "Cluster '{{ cluster_name }}' not found in vCenter {{ vcenter_hostname }}"
   when: esxi_cluster_key | default('') | length == 0
-  run_once: true
-
-- name: Set normalized cluster host names
-  ansible.builtin.set_fact:
-    esxi_cluster_hosts_raw: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters[esxi_cluster_key].hosts | default([]) }}"
-    esxi_cluster_host_names: "{{ (hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters[esxi_cluster_key].hosts | default([])) | map('lower') | list }}"
-    esxi_cluster_host_short: "{{ (hostvars[ansible_play_hosts_all[0]].esxi_cluster_info.clusters[esxi_cluster_key].hosts | default([])) | map('regex_replace', '\\..*$', '') | map('lower') | list }}"
-  run_once: true
-
-- name: Copy cluster name lists to this host
-  ansible.builtin.set_fact:
-    esxi_cluster_hosts_raw: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_hosts_raw | default([]) }}"
-    esxi_cluster_host_names: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_names | default([]) }}"
-    esxi_cluster_host_short: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_short | default([]) }}"
-    esxi_cluster_key: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_key }}"
-
-- name: Mark whether this ESXi is in the target cluster
-  ansible.builtin.set_fact:
-    esxi_in_target_cluster: "{{ (inventory_hostname | lower in esxi_cluster_host_names) or (inventory_hostname.split('.')[0] | lower in esxi_cluster_host_short) }}"
-
-- name: Collect inventory hosts that belong to the cluster
-  ansible.builtin.set_fact:
-    esxi_cluster_inventory_hosts: "{{ (esxi_cluster_inventory_hosts | default([])) + [item] }}"
-  loop: "{{ ansible_play_hosts_all }}"
-  when: (item | lower in hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_names) or (item.split('.')[0] | lower in hostvars[ansible_play_hosts_all[0]].esxi_cluster_host_short)
-  run_once: true
 
 - name: Fail if no inventory host is in cluster
   ansible.builtin.fail:
     msg: "No inventory host belongs to cluster '{{ cluster_name }}'. Cluster hosts: {{ esxi_cluster_hosts_raw }}"
-  when: (hostvars[ansible_play_hosts_all[0]].esxi_cluster_inventory_hosts | default([])) | length == 0
-  run_once: true
-
-- name: Set prepare host to first cluster member in inventory
-  ansible.builtin.set_fact:
-    esxi_prepare_host: "{{ hostvars[ansible_play_hosts_all[0]].esxi_cluster_inventory_hosts[0] }}"
+  when: esxi_cluster_inventory_hosts | default([]) | length == 0
 
 - name: Show cluster targeting
   ansible.builtin.debug:
     msg: >-
       cluster={{ cluster_name }} storage_type={{ storage_type }}
       in_cluster={{ esxi_in_target_cluster }} prepare_host={{ esxi_prepare_host }}
+
 
 
 ---
