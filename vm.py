@@ -50,7 +50,6 @@ def get_obj_path(obj):
     path_elements = []
     current = obj
     while current.parent is not None:
-        # 跳过隐藏的根节点和基础文件夹（如 datacenters）以匹配标准路径格式
         if current.name not in ['Datacenters'] and current.parent.name != '':
             path_elements.insert(0, current.name)
         current = current.parent
@@ -73,17 +72,14 @@ def build_inventory(si):
         return inventory
 
     content = si.RetrieveContent()
-    # 查找所有的虚拟机
     container = content.viewManager.CreateContainerView(
         content.rootFolder, [vim.VirtualMachine], True
     )
     
     for vm in container.view:
-        # 忽略模板，如果你想包含模板可以去掉这个判断
         if vm.config and vm.config.template:
             continue
 
-        # hostnames: config.name (截图第17行)
         try:
             host_name = vm.config.name
         except AttributeError:
@@ -92,27 +88,45 @@ def build_inventory(si):
         if not host_name:
             continue
 
-        # 获取路径 (模拟 with_path: yes)
         vm_path = get_obj_path(vm)
-
-        # 提取 moid (模拟 moid: summary.vm | trim | split | last)
-        # 在 pyvmomi 中，vm 的 moid 直接就是 vm._moId
         moid = vm._moId
 
-        # 提取 datacenter (模拟 datacenter: path.split('/')[1])
         path_parts = vm_path.split('/')
         datacenter = path_parts[1] if len(path_parts) > 1 else ""
+        
+        # 获取 connection state
+        try:
+            conn_state = str(vm.runtime.connectionState)
+        except AttributeError:
+            conn_state = "unknown"
+            
+        # 格式化 summary.vm 字符串
+        summary_vm = f"'vim.VirtualMachine:{moid}'"
 
-        # 填充主机的 hostvars
+        # 完全匹配截图中的变量结构
         inventory["_meta"]["hostvars"][host_name] = {
-            "name": vm.name,
-            "config": {"name": host_name},
-            "path": vm_path,
+            "categories": [],
+            "config": {
+                "name": host_name
+            },
+            "config.name": host_name,
+            "datacenter": datacenter,
             "moid": moid,
-            "datacenter": datacenter
+            "name": vm.name,
+            "path": vm_path,
+            "runtime": {
+                "connectionState": conn_state
+            },
+            "runtime.connectionState": conn_state,
+            "summary": {
+                "vm": summary_vm
+            },
+            "summary.vm": summary_vm,
+            "tag_category": {},
+            "tags": []
         }
 
-        # --- 实现 groups 逻辑 (截图 21-24 行) ---
+        # 分组逻辑
         if 'Linux' in vm_path:
             inventory["COD_Linux"]["hosts"].append(host_name)
         if 'Windows' in vm_path:
